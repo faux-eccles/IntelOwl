@@ -12,7 +12,7 @@ from api_app.analyzers_manager.exceptions import (
     AnalyzerConfigurationException,
     AnalyzerRunException,
 )
-from tests.mock_utils import MockUpResponse, if_mock_connections, patch
+from api_app.choices import Classification
 
 logger = logging.getLogger(__name__)
 
@@ -64,22 +64,22 @@ class InQuest(ObservableAnalyzer):
 
         if self.inquest_analysis == "dfi_search":
             link = "dfi"
-            if self.observable_classification == self.ObservableTypes.HASH:
+            if self.observable_classification == Classification.HASH:
                 uri = (
                     f"/api/dfi/search/hash/{self.hash_type}?hash={self.observable_name}"
                 )
 
             elif self.observable_classification in [
-                self.ObservableTypes.IP,
-                self.ObservableTypes.URL,
-                self.ObservableTypes.DOMAIN,
+                Classification.IP,
+                Classification.URL,
+                Classification.DOMAIN,
             ]:
                 uri = (
                     f"/api/dfi/search/ioc/{self.observable_classification}"
                     f"?keyword={self.observable_name}"
                 )
 
-            elif self.observable_classification == self.ObservableTypes.GENERIC:
+            elif self.observable_classification == Classification.GENERIC:
                 try:
                     type_, value = self.observable_name.split(":")
                 except ValueError:
@@ -113,7 +113,7 @@ class InQuest(ObservableAnalyzer):
         result = response.json()
         if (
             self.inquest_analysis == "dfi_search"
-            and self.observable_classification == self.ObservableTypes.HASH
+            and self.observable_classification == Classification.HASH
         ):
             result["hash_type"] = self.hash_type
 
@@ -122,15 +122,3 @@ class InQuest(ObservableAnalyzer):
 
         result["link"] = f"https://labs.inquest.net/{link}"
         return result
-
-    @classmethod
-    def _monkeypatch(cls):
-        patches = [
-            if_mock_connections(
-                patch(
-                    "requests.get",
-                    return_value=MockUpResponse({}, 200),
-                ),
-            )
-        ]
-        return super()._monkeypatch(patches=patches)

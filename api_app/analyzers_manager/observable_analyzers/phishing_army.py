@@ -10,7 +10,7 @@ from django.conf import settings
 
 from api_app.analyzers_manager import classes
 from api_app.analyzers_manager.exceptions import AnalyzerRunException
-from tests.mock_utils import MockUpResponse, if_mock_connections, patch
+from api_app.choices import Classification
 
 logger = logging.getLogger(__name__)
 
@@ -23,9 +23,8 @@ class PhishingArmy(classes.ObservableAnalyzer):
 
     def run(self):
         result = {"found": False}
-        if not os.path.isfile(database_location):
-            if not self.update():
-                raise AnalyzerRunException("Failed extraction of Phishing Army db")
+        if not os.path.isfile(database_location) and not self.update():
+            raise AnalyzerRunException("Failed extraction of Phishing Army db")
 
         if not os.path.exists(database_location):
             raise AnalyzerRunException(
@@ -37,7 +36,7 @@ class PhishingArmy(classes.ObservableAnalyzer):
 
         db_list = db.split("\n")
         to_analyze_observable = self.observable_name
-        if self.observable_classification == self.ObservableTypes.URL:
+        if self.observable_classification == Classification.URL:
             to_analyze_observable = urlparse(self.observable_name).hostname
 
         if to_analyze_observable in db_list:
@@ -66,15 +65,3 @@ class PhishingArmy(classes.ObservableAnalyzer):
             logger.exception(e)
 
         return False
-
-    @classmethod
-    def _monkeypatch(cls):
-        patches = [
-            if_mock_connections(
-                patch(
-                    "requests.get",
-                    return_value=MockUpResponse({}, 200, content=b"91.192.100.61"),
-                ),
-            )
-        ]
-        return super()._monkeypatch(patches=patches)

@@ -8,15 +8,16 @@ import {
   SyncButton,
   TableHintIcon,
   useDataTable,
+  useDebounceInput,
 } from "@certego/certego-ui";
 
 import useTitle from "react-use/lib/useTitle";
+import { format } from "date-fns";
 import { jobTableColumns } from "./jobTableColumns";
-import { TimePicker } from "../../common/TimePicker";
-
 import { JOB_BASE_URI } from "../../../constants/apiURLs";
 import { usePluginConfigurationStore } from "../../../stores/usePluginConfigurationStore";
-import { useTimePickerStore } from "../../../stores/useTimePickerStore";
+import { datetimeFormatStr } from "../../../constants/miscConst";
+import { TimePicker } from "../../common/TimePicker";
 
 // constants
 const toPassTableProps = {
@@ -29,53 +30,65 @@ const toPassTableProps = {
   ),
 };
 
-// component
-export default function JobsTable() {
+export function JobsTable({ searchFromDateValue, searchToDateValue }) {
+  useTitle("IntelOwl | Jobs History", { restoreOnUnmount: true });
+
   const [playbooksLoading, playbooksError] = usePluginConfigurationStore(
     (state) => [state.playbooksLoading, state.playbooksError],
   );
 
-  console.debug("JobsTable rendered!");
-
-  // page title
-  useTitle("IntelOwl | Jobs History", { restoreOnUnmount: true });
-
-  const [toDateValue, fromDateValue] = useTimePickerStore((state) => [
-    state.toDateValue,
-    state.fromDateValue,
-  ]);
-
-  // state
-  const [initialLoading, setInitialLoading] = React.useState(true);
-
-  // API/ Table
-  const [data, tableNode, refetch, _, loadingTable] = useDataTable(
+  const [
+    data,
+    tableNode,
+    refetch,
+    tableStateReducer,
+    loadingTable,
+    tableState,
+  ] = useDataTable(
     {
       url: JOB_BASE_URI,
-      params: {
-        received_request_time__gte: fromDateValue,
-        received_request_time__lte: toDateValue,
-      },
-      initialParams: {
-        ordering: "-received_request_time",
-      },
     },
     toPassTableProps,
   );
 
-  React.useEffect(() => {
-    if (!loadingTable) setInitialLoading(false);
-  }, [loadingTable]);
+  // state
+  const [fromDateType, setFromDateType] = React.useState(searchFromDateValue);
+  const [toDateType, setToDateType] = React.useState(searchToDateValue);
 
-  React.useEffect(() => {
-    if (!initialLoading) refetch();
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [initialLoading]);
+  const onChangeFilter = ({ name, value }) => {
+    const { filters } = tableState;
+    // check if there is already a filter for the selected item
+    const filterIndex = filters.findIndex((filter) => filter.id === name);
+
+    // If the filter is already present (index>=0) I update the value
+    if (filterIndex !== -1) {
+      // Note: this check is required to avoid infinite loop
+      if (filters[filterIndex].value === format(value, datetimeFormatStr))
+        return null;
+      filters[filterIndex].value = value;
+    }
+    // otherwise I add a new element to the filter list
+    else filters.push({ id: name, value });
+    // set new filters
+    return tableStateReducer({ filters }, { type: "setFilter" });
+  };
+
+  // this update the value after some times, this give user time to pick the datetime
+  useDebounceInput(
+    { name: "received_request_time__gte", value: fromDateType },
+    1000,
+    onChangeFilter,
+  );
+  useDebounceInput(
+    { name: "received_request_time__lte", value: toDateType },
+    1000,
+    onChangeFilter,
+  );
 
   return (
     // this loader is required to correctly get the name of the playbook executed
     <Loader
-      loading={playbooksLoading}
+      loading={playbooksLoading || loadingTable}
       error={playbooksError}
       render={() => (
         <Container fluid>
@@ -101,7 +114,15 @@ export default function JobsTable() {
               </div>
             </Col>
             <Col className="align-self-center">
-              <TimePicker />
+              <TimePicker
+                id="jobs-table__time-picker"
+                fromName="received_request_time__gte"
+                toName="received_request_time__lte"
+                fromValue={fromDateType}
+                toValue={toDateType}
+                fromOnChange={setFromDateType}
+                toOnChange={setToDateType}
+              />
             </Col>
           </Row>
           {/* Actions */}

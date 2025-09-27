@@ -5,7 +5,7 @@ import requests
 
 from api_app.analyzers_manager import classes
 from api_app.analyzers_manager.exceptions import AnalyzerRunException
-from tests.mock_utils import MockUpResponse, if_mock_connections, patch
+from api_app.choices import Classification
 
 
 class Stalkphish(classes.ObservableAnalyzer):
@@ -25,12 +25,12 @@ class Stalkphish(classes.ObservableAnalyzer):
         obs_clsfn = self.observable_classification
 
         if obs_clsfn in [
-            self.ObservableTypes.DOMAIN,
-            self.ObservableTypes.URL,
-            self.ObservableTypes.GENERIC,
+            Classification.DOMAIN,
+            Classification.URL,
+            Classification.GENERIC,
         ]:
             uri = f"search/url/{self.observable_name}"
-        elif obs_clsfn == self.ObservableTypes.IP:
+        elif obs_clsfn == Classification.IP:
             uri = f"search/ipv4/{self.observable_name}"
         else:
             raise AnalyzerRunException(
@@ -45,15 +45,3 @@ class Stalkphish(classes.ObservableAnalyzer):
             raise AnalyzerRunException(e)
 
         return response.json()
-
-    @classmethod
-    def _monkeypatch(cls):
-        patches = [
-            if_mock_connections(
-                patch(
-                    "requests.get",
-                    return_value=MockUpResponse({}, 200),
-                ),
-            )
-        ]
-        return super()._monkeypatch(patches=patches)

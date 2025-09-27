@@ -10,8 +10,8 @@ import pypdns
 
 from api_app.analyzers_manager import classes
 from api_app.analyzers_manager.exceptions import AnalyzerRunException
+from api_app.choices import Classification
 from certego_saas.apps.user.models import User
-from tests.mock_utils import MockResponseNoOp, if_mock_connections, patch
 
 
 class CIRCL_PDNS(classes.ObservableAnalyzer):
@@ -21,7 +21,7 @@ class CIRCL_PDNS(classes.ObservableAnalyzer):
     def config(self, runtime_configuration: Dict):
         super().config(runtime_configuration)
         self.domain = self.observable_name
-        if self.observable_classification == self.ObservableTypes.URL:
+        if self.observable_classification == Classification.URL:
             self.domain = urlparse(self.observable_name).hostname
             # You should save CIRCL credentials with this template: "<user>|<pwd>"
         self.split_credentials = self._pdns_credentials.split("|")
@@ -55,12 +55,3 @@ class CIRCL_PDNS(classes.ObservableAnalyzer):
 
     def _get_health_check_url(self, user: User = None) -> typing.Optional[str]:
         return self.url
-
-    @classmethod
-    def _monkeypatch(cls):
-        patches = [
-            if_mock_connections(
-                patch("pypdns.PyPDNS", return_value=MockResponseNoOp({}, 200)),
-            )
-        ]
-        return super()._monkeypatch(patches=patches)

@@ -33,3 +33,17 @@ export const PluginConfigTypesNumeric = Object.freeze({
   PARAMETER: "1",
   SECRET: "2",
 });
+
+export const PluginConfigTypes = Object.freeze({
+  USER_CONFIG: "userConfig",
+  ORG_CONFIG: "orgConfig",
+});
+
+export const ParameterTypes = Object.freeze({
+  INT: "int",
+  FLOAT: "float",
+  STR: "str",
+  BOOL: "bool",
+  LIST: "list",
+  DICT: "dict",
+});

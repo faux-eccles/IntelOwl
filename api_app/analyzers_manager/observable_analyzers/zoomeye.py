@@ -8,7 +8,7 @@ from api_app.analyzers_manager.exceptions import (
     AnalyzerConfigurationException,
     AnalyzerRunException,
 )
-from tests.mock_utils import MockUpResponse, if_mock_connections, patch
+from api_app.choices import Classification
 
 
 class ZoomEye(classes.ObservableAnalyzer):
@@ -26,7 +26,7 @@ class ZoomEye(classes.ObservableAnalyzer):
         pass
 
     def __build_zoomeye_url(self):
-        if self.observable_classification == self.ObservableTypes.IP:
+        if self.observable_classification == Classification.IP:
             self.query += f" ip:{self.observable_name}"
         else:
             self.query += f" hostname:{self.observable_name}"
@@ -76,15 +76,3 @@ class ZoomEye(classes.ObservableAnalyzer):
         result.update(response.json())
 
         return result
-
-    @classmethod
-    def _monkeypatch(cls):
-        patches = [
-            if_mock_connections(
-                patch(
-                    "requests.get",
-                    return_value=MockUpResponse({}, 200),
-                ),
-            )
-        ]
-        return super()._monkeypatch(patches=patches)

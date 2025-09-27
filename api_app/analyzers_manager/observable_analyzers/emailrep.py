@@ -5,7 +5,7 @@ import requests
 
 from api_app.analyzers_manager import classes
 from api_app.analyzers_manager.exceptions import AnalyzerRunException
-from tests.mock_utils import MockUpResponse, if_mock_connections, patch
+from api_app.choices import Classification
 
 
 class EmailRep(classes.ObservableAnalyzer):
@@ -30,7 +30,7 @@ class EmailRep(classes.ObservableAnalyzer):
             "Accept": "application/json",
         }
 
-        if self.observable_classification not in [self.ObservableTypes.GENERIC]:
+        if self.observable_classification not in [Classification.GENERIC]:
             raise AnalyzerRunException(
                 f"not supported observable type {self.observable_classification}."
                 f" Supported: generic"
@@ -42,15 +42,3 @@ class EmailRep(classes.ObservableAnalyzer):
         response.raise_for_status()
 
         return response.json()
-
-    @classmethod
-    def _monkeypatch(cls):
-        patches = [
-            if_mock_connections(
-                patch(
-                    "requests.get",
-                    return_value=MockUpResponse({}, 200),
-                ),
-            )
-        ]
-        return super()._monkeypatch(patches=patches)

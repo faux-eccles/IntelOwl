@@ -16,7 +16,6 @@ import {
 } from "reactstrap";
 
 import { Loader } from "@certego/certego-ui";
-import { JSONTree } from "react-json-tree";
 
 import { useNavigate, useLocation } from "react-router-dom";
 import { PluginsReportTable } from "./pluginReportTables";
@@ -26,7 +25,7 @@ import {
   ReportedPluginTooltip,
 } from "./utils/reportedPlugins";
 import { StatusIcon } from "../../common/icon/StatusIcon";
-import VisualizerReport from "./visualizer/visualizer";
+import VisualizerReport from "../../common/visualizer/visualizer";
 import { JobFinalStatuses } from "../../../constants/jobConst";
 import { PluginStatuses } from "../../../constants/pluginConst";
 import { JobResultSections } from "../../../constants/miscConst";
@@ -35,6 +34,7 @@ import { JobInfoCard } from "./JobInfoCard";
 import { JobIsRunningAlert } from "./JobIsRunningAlert";
 import { JobActionsBar } from "./bar/JobActionBar";
 import { usePluginConfigurationStore } from "../../../stores/usePluginConfigurationStore";
+import { JsonEditor } from "../../common/JsonEditor";
 
 /* THESE IDS CANNOT BE EMPTY!
 We perform a redirect in case the user landed in the visualzier page without a visualizer,
@@ -195,12 +195,36 @@ export function JobOverview({
         report: (
           <div
             id={`jobfullreport-jsoninput-${job.id}`}
-            style={{ height: "60vh", overflow: "scroll" }}
+            style={{ height: "65vh", overflow: "scroll" }}
           >
-            <JSONTree
-              data={job}
-              keyPath={["job"]}
-              shouldExpandNodeInitially={() => true}
+            <JsonEditor
+              id="job_full_report_json"
+              initialJsonData={job}
+              height="65vh"
+              width="100%"
+              readOnly
+            />
+          </div>
+        ),
+      },
+      {
+        name: "data_model",
+        nav: (
+          <div className="d-flex-center">
+            <strong>Data Model</strong>
+          </div>
+        ),
+        report: (
+          <div
+            id={`jobdatamodel-jsoninput-${job.id}`}
+            style={{ height: "65vh", overflow: "scroll" }}
+          >
+            <JsonEditor
+              id="job_data_model_json"
+              initialJsonData={job.data_model}
+              height="65vh"
+              width="100%"
+              readOnly
             />
           </div>
         ),

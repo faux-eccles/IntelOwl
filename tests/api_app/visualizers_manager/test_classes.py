@@ -4,13 +4,15 @@
 
 from kombu import uuid
 
+from api_app.analyzables_manager.models import Analyzable
 from api_app.analyzers_manager.models import AnalyzerReport
-from api_app.choices import PythonModuleBasePaths
+from api_app.choices import Classification, PythonModuleBasePaths
 from api_app.models import Job, PythonModule
 from api_app.playbooks_manager.models import PlaybookConfig
 from api_app.visualizers_manager.classes import (
     VisualizableBase,
     VisualizableBool,
+    VisualizableDownload,
     VisualizableHorizontalList,
     VisualizableLevel,
     VisualizableLevelSize,
@@ -55,7 +57,31 @@ class VisualizableObjectTestCase(CustomTestCase):
 
 class VisualizableBaseTestCase(CustomTestCase):
     def test_to_dict(self):
+        # no link
         vo = VisualizableBase(
+            "test",
+            color=VisualizableColor.DARK,
+            disable=True,
+            description="description-test",
+        )
+        expected_result = {
+            "alignment": "center",
+            "disable": True,
+            "bold": False,
+            "italic": False,
+            "type": "base",
+            "value": "test",
+            "color": "dark",
+            "size": "auto",
+            "link": "",
+            "icon": "",
+            "copy_text": "test",
+            "description": "description-test",
+        }
+        self.assertEqual(vo.to_dict(), expected_result)
+
+        # link
+        vb = VisualizableBase(
             "test",
             color=VisualizableColor.DARK,
             link="https://test.com",
@@ -73,10 +99,10 @@ class VisualizableBaseTestCase(CustomTestCase):
             "size": "auto",
             "link": "https://test.com",
             "icon": "",
-            "copy_text": "test",
+            "copy_text": "https://test.com",
             "description": "description-test",
         }
-        self.assertEqual(vo.to_dict(), expected_result)
+        self.assertEqual(vb.to_dict(), expected_result)
 
     def test_empty(self):
         vo = VisualizableBase(
@@ -95,6 +121,7 @@ class VisualizableBaseTestCase(CustomTestCase):
             size=VisualizableSize.S_3,
             link="https://test.com",
             disable=True,
+            copy_text="no text",
         )
         expected_result = {
             "alignment": "center",
@@ -107,8 +134,76 @@ class VisualizableBaseTestCase(CustomTestCase):
             "size": "3",
             "link": "https://test.com",
             "icon": "",
+            "copy_text": "no text",
+            "description": "",
+        }
+        self.assertEqual(vo.to_dict(), expected_result)
+
+
+class VisualizableDownloadTestCase(CustomTestCase):
+    def test_to_dict(self):
+        vo = VisualizableDownload(
+            value="hello.txt",
+            payload="hello, world",
+            link="https://test.com",
+            disable=True,
+            description="description-test",
+        )
+        expected_result = {
+            "alignment": "center",
+            "disable": True,
+            "type": "download",
+            "value": "hello.txt",
+            "size": "auto",
+            "link": "https://test.com",
+            "copy_text": "",
+            "payload": "hello, world",
+            "mimetype": "text/plain",
+            "description": "description-test",
+            "add_metadata_in_description": True,
+        }
+        self.assertEqual(vo.to_dict(), expected_result)
+
+    def test_empty(self):
+        vo = VisualizableDownload(
+            value="",
+            payload="",
+            disable=False,
+        )
+        expected_result = {
+            "alignment": "center",
+            "disable": False,
+            "type": "download",
+            "value": "",
+            "size": "auto",
+            "link": "",
+            "copy_text": "",
+            "payload": "",
+            "mimetype": "application/x-empty",
+            "description": "",
+            "add_metadata_in_description": True,
+        }
+        self.assertEqual(vo.to_dict(), expected_result)
+
+    def test_disable(self):
+        vo = VisualizableDownload(
+            value="",
+            payload="hello, world",
+            size=VisualizableSize.S_3,
+            disable=True,
+        )
+        expected_result = {
+            "alignment": "center",
+            "disable": True,
+            "type": "download",
+            "value": "",
+            "size": "3",
+            "link": "",
+            "payload": "hello, world",
             "copy_text": "",
             "description": "",
+            "mimetype": "text/plain",
+            "add_metadata_in_description": True,
         }
         self.assertEqual(vo.to_dict(), expected_result)
 
@@ -404,9 +499,12 @@ class VisualizerTestCase(CustomTestCase):
                 return {}
 
         pc = PlaybookConfig.objects.first()
+        an = Analyzable.objects.create(
+            name="test.com",
+            classification=Classification.DOMAIN,
+        )
         job = Job.objects.create(
-            observable_name="test.com",
-            observable_classification="domain",
+            analyzable=an,
             status="reported_without_fails",
         )
         vc = VisualizerConfig.objects.create(
@@ -424,10 +522,11 @@ class VisualizerTestCase(CustomTestCase):
         )
         v = MockUpVisualizer(vc)
         v.job_id = job.pk
-        self.assertEqual(list(v.analyzer_reports()), [ar])
+        self.assertEqual(list(v.get_analyzer_reports()), [ar])
         ar.delete()
         job.delete()
         vc.delete()
+        an.delete()
 
     def test_subclasses(self):
         def handler(signum, frame):
@@ -437,9 +536,12 @@ class VisualizerTestCase(CustomTestCase):
 
         signal.signal(signal.SIGALRM, handler)
 
+        an = Analyzable.objects.create(
+            name="test.com",
+            classification=Classification.DOMAIN,
+        )
         job = Job.objects.create(
-            observable_name="test.com",
-            observable_classification="domain",
+            analyzable=an,
             status="reported_without_fails",
             user=self.superuser,
         )
@@ -478,6 +580,7 @@ class VisualizerTestCase(CustomTestCase):
                     signal.alarm(0)
 
         job.delete()
+        an.delete()
 
 
 class ErrorHandlerTestCase(CustomTestCase):

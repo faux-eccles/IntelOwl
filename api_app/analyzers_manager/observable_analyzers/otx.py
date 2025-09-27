@@ -10,8 +10,8 @@ import requests
 
 from api_app.analyzers_manager import classes
 from api_app.analyzers_manager.exceptions import AnalyzerRunException
+from api_app.choices import Classification
 from api_app.helpers import get_hash_type
-from tests.mock_utils import MockUpResponse, if_mock_connections, patch
 
 logger = logging.getLogger(__name__)
 
@@ -70,9 +70,9 @@ class OTX(classes.ObservableAnalyzer):
 
     def _extract_indicator_type(self) -> "OTXv2.IndicatorTypes":
         observable_classification = self.observable_classification
-        if observable_classification == self.ObservableTypes.IP:
+        if observable_classification == Classification.IP:
             otx_type = OTXv2.IndicatorTypes.IPv4
-        elif observable_classification == self.ObservableTypes.URL:
+        elif observable_classification == Classification.URL:
             to_analyze_observable = urlparse(self.observable_name).hostname
 
             try:
@@ -84,9 +84,9 @@ class OTX(classes.ObservableAnalyzer):
 
             if not to_analyze_observable:
                 raise AnalyzerRunException("extracted observable is None")
-        elif observable_classification == self.ObservableTypes.DOMAIN:
+        elif observable_classification == Classification.DOMAIN:
             otx_type = OTXv2.IndicatorTypes.DOMAIN
-        elif observable_classification == self.ObservableTypes.HASH:
+        elif observable_classification == Classification.HASH:
             matched_type = get_hash_type(self.observable_name)
             if matched_type == "md5":
                 otx_type = OTXv2.IndicatorTypes.FILE_HASH_MD5
@@ -210,12 +210,3 @@ class OTX(classes.ObservableAnalyzer):
                 result[field_name] = data
                 logger.debug(f"result: {result}")
         return result
-
-    @classmethod
-    def _monkeypatch(cls):
-        patches = [
-            if_mock_connections(
-                patch("requests.Session.get", return_value=MockUpResponse({}, 200))
-            )
-        ]
-        return super()._monkeypatch(patches=patches)

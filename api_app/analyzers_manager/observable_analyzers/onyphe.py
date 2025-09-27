@@ -5,7 +5,7 @@ import requests
 
 from api_app.analyzers_manager import classes
 from api_app.analyzers_manager.exceptions import AnalyzerRunException
-from tests.mock_utils import MockUpResponse, if_mock_connections, patch
+from api_app.choices import Classification
 
 
 class Onyphe(classes.ObservableAnalyzer):
@@ -24,11 +24,11 @@ class Onyphe(classes.ObservableAnalyzer):
         }
         obs_clsfn = self.observable_classification
 
-        if obs_clsfn == self.ObservableTypes.DOMAIN:
+        if obs_clsfn == Classification.DOMAIN:
             uri = f"domain/{self.observable_name}"
-        elif obs_clsfn == self.ObservableTypes.IP:
+        elif obs_clsfn == Classification.IP:
             uri = f"ip/{self.observable_name}"
-        elif obs_clsfn == self.ObservableTypes.URL:
+        elif obs_clsfn == Classification.URL:
             uri = f"hostname/{self.observable_name}"
         else:
             raise AnalyzerRunException(
@@ -43,15 +43,3 @@ class Onyphe(classes.ObservableAnalyzer):
             raise AnalyzerRunException(e)
 
         return response.json()
-
-    @classmethod
-    def _monkeypatch(cls):
-        patches = [
-            if_mock_connections(
-                patch(
-                    "requests.get",
-                    return_value=MockUpResponse({}, 200),
-                ),
-            )
-        ]
-        return super()._monkeypatch(patches=patches)

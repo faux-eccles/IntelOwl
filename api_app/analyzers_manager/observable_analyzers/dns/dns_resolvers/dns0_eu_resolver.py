@@ -9,7 +9,7 @@ import requests
 
 from api_app.analyzers_manager import classes
 from api_app.analyzers_manager.exceptions import AnalyzerRunException
-from tests.mock_utils import MockUpResponse, if_mock_connections, patch
+from api_app.choices import Classification
 
 from ..dns_responses import dns_resolver_response
 
@@ -32,7 +32,7 @@ class DNS0EUResolver(classes.ObservableAnalyzer):
         resolutions = None
         try:
             # for URLs we are checking the relative domain
-            if self.observable_classification == self.ObservableTypes.URL:
+            if self.observable_classification == Classification.URL:
                 observable = urlparse(self.observable_name).hostname
                 try:
                     IPv4Address(observable)
@@ -54,15 +54,3 @@ class DNS0EUResolver(classes.ObservableAnalyzer):
             logger.info(f"not analyzing {observable} because not a domain")
 
         return dns_resolver_response(self.observable_name, resolutions)
-
-    @classmethod
-    def _monkeypatch(cls):
-        patches = [
-            if_mock_connections(
-                patch(
-                    "requests.get",
-                    return_value=MockUpResponse({"Answer": ["test1", "test2"]}, 200),
-                ),
-            )
-        ]
-        return super()._monkeypatch(patches=patches)

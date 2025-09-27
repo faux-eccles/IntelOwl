@@ -21,7 +21,7 @@ if TYPE_CHECKING:
 import logging
 
 from celery.canvas import Signature
-from django.db import models
+from django.db import IntegrityError, models
 from django.db.models import (
     BooleanField,
     Case,
@@ -74,7 +74,7 @@ class SendToBiQuerySet(models.QuerySet):
         ) as f:
             body = json.load(f)
             body["index_patterns"] = [f"{settings.ELASTICSEARCH_BI_INDEX}-*"]
-            settings.ELASTICSEARCH_CLIENT.indices.put_template(
+            settings.ELASTICSEARCH_BI_CLIENT.indices.put_template(
                 name=settings.ELASTICSEARCH_BI_INDEX, body=body
             )
             logger.info(
@@ -105,7 +105,7 @@ class SendToBiQuerySet(models.QuerySet):
             serializer = self._get_bi_serializer_class()(instance=objects, many=True)
             objects_serialized = serializer.data
             _, errors = bulk(
-                settings.ELASTICSEARCH_CLIENT,
+                settings.ELASTICSEARCH_BI_CLIENT,
                 objects_serialized,
                 request_timeout=max_timeout,
             )
@@ -280,7 +280,17 @@ class JobQuerySet(MP_NodeQuerySet, CleanOnCreateQuerySet, SendToBiQuerySet):
         """
         if parent:
             return parent.add_child(**kwargs)
-        return self.model.add_root(**kwargs)
+        # try multiple times hoping to for no race conditions
+        total_attempt_number = 5
+        for attempt in range(0, total_attempt_number):
+            try:
+                return self.model.add_root(**kwargs)
+            except IntegrityError:
+                logger.warning(
+                    f"Found race condition for {kwargs['name']}. Trying again to calculate path."
+                )
+                if attempt == total_attempt_number - 1:
+                    raise
 
     def delete(self, *args, **kwargs):
         """
@@ -312,7 +322,7 @@ class JobQuerySet(MP_NodeQuerySet, CleanOnCreateQuerySet, SendToBiQuerySet):
         Returns:
             The filtered queryset.
         """
-        return self.filter(status__in=self.model.Status.final_statuses())
+        return self.filter(status__in=self.model.STATUSES.final_statuses())
 
     def visible_for_user(self, user: User) -> "JobQuerySet":
         """
@@ -409,10 +419,10 @@ class JobQuerySet(MP_NodeQuerySet, CleanOnCreateQuerySet, SendToBiQuerySet):
             The filtered queryset.
         """
         qs = self.exclude(
-            status__in=[status.value for status in self.model.Status.final_statuses()]
+            status__in=[status.value for status in self.model.STATUSES.final_statuses()]
         )
         if not check_pending:
-            qs = qs.exclude(status=self.model.Status.PENDING.value)
+            qs = qs.exclude(status=self.model.STATUSES.PENDING.value)
         difference = now() - datetime.timedelta(minutes=minutes_ago)
         return qs.filter(received_request_time__lte=difference)
 
@@ -673,7 +683,7 @@ class AbstractReportQuerySet(SendToBiQuerySet):
         Returns:
             AbstractReportQuerySet: The filtered queryset.
         """
-        return self.filter(status__in=self.model.Status.final_statuses())
+        return self.filter(status__in=self.model.STATUSES.final_statuses())
 
     def filter_retryable(self):
         """
@@ -683,7 +693,10 @@ class AbstractReportQuerySet(SendToBiQuerySet):
             AbstractReportQuerySet: The filtered queryset.
         """
         return self.filter(
-            status__in=[self.model.Status.FAILED.value, self.model.Status.PENDING.value]
+            status__in=[
+                self.model.STATUSES.FAILED.value,
+                self.model.STATUSES.PENDING.value,
+            ]
         )
 
     def get_configurations(self) -> AbstractConfigQuerySet:
@@ -693,7 +706,9 @@ class AbstractReportQuerySet(SendToBiQuerySet):
         Returns:
             AbstractConfigQuerySet: The queryset of configurations.
         """
-        return self.model.config.objects.filter(pk__in=self.values("config__pk"))
+        return self.model.config.field.related_model.objects.filter(
+            pk__in=self.values("config_id")
+        )
 
 
 class ModelWithOwnershipQuerySet:
@@ -934,7 +949,7 @@ class PythonConfigQuerySet(AbstractConfigQuerySet):
 
             task_id = str(uuid.uuid4())
             config.generate_empty_report(
-                job, task_id, AbstractReport.Status.PENDING.value
+                job, task_id, AbstractReport.STATUSES.PENDING.value
             )
             args = [
                 job.pk,
@@ -955,28 +970,17 @@ class PythonConfigQuerySet(AbstractConfigQuerySet):
             )
 
 
-class IngestorQuerySet(PythonConfigQuerySet):
-    """
-    Custom queryset for Ingestor model, providing methods for annotating configurations specific to ingestors.
+class CommentQuerySet(QuerySet):
 
-    Methods:
-    - annotate_runnable: Annotates ingestors indicating if they are runnable.
-    """
+    def visible_for_user(self, user):
+        from api_app.analyzables_manager.models import Analyzable
 
-    def annotate_runnable(self, user: User = None) -> "PythonConfigQuerySet":
-        """
-        Annotates ingestors indicating if they are runnable.
-
-        Args:
-            user (User, optional): The user to check. Defaults to None.
-
-        Returns:
-            PythonConfigQuerySet: The annotated queryset.
-        """
-        # the plugin is runnable IF
-        # - it is not disabled
-        qs = self.filter(
-            pk=OuterRef("pk"),
-        ).exclude(disabled=True)
-
-        return self.annotate(runnable=Exists(qs))
+        analyzables = Analyzable.objects.visible_for_user(user)
+        qs = self.filter(analyzable__in=analyzables.values_list("pk", flat=True))
+        if user.has_membership():
+            qs = qs.filter(
+                user__membership__organization__pk=user.membership.organization.pk
+            )
+        else:
+            qs = qs.filter(user=user)
+        return qs

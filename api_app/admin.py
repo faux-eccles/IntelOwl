@@ -5,6 +5,7 @@ from typing import Any
 
 from django.contrib import admin, messages
 from django.contrib.admin import widgets
+from django.contrib.admin.models import LogEntry
 from django.db.models import JSONField, ManyToManyField
 from django.http import HttpRequest
 from prettyjson.widgets import PrettyJSONWidget
@@ -48,10 +49,8 @@ class JobAdminView(CustomAdminView):
         "id",
         "status",
         "user",
-        "observable_name",
-        "observable_classification",
-        "file_name",
-        "file_mimetype",
+        "get_analyzable_name",
+        "get_analyzable_classification",
         "received_request_time",
         "analyzers_executed",
         "connectors_executed",
@@ -63,12 +62,15 @@ class JobAdminView(CustomAdminView):
         "user",
         "status",
     )
-    search_fields = (
-        "md5",
-        "observable_name",
-        "file_name",
-    )
     list_filter = ("status", "user", "tags")
+
+    @admin.display(description="Name")
+    def get_analyzable_name(self, instance):
+        return instance.analyzable.name
+
+    @admin.display(description="Classification")
+    def get_analyzable_classification(self, instance):
+        return instance.analyzable.classification
 
     @staticmethod
     def has_add_permission(request: HttpRequest) -> bool:
@@ -121,8 +123,6 @@ class PluginConfigAdminView(ModelWithOwnershipAdminView, CustomAdminView):
         "pk",
         "get_config",
         "parameter",
-        "for_organization",
-        "get_owner",
         "get_type",
         "value",
     ) + ModelWithOwnershipAdminView.list_display
@@ -254,3 +254,30 @@ class OrganizationPluginConfigurationAdminView(CustomAdminView):
     exclude = ["content_type", "object_id"]
     list_filter = ["organization", "content_type"]
     form = OrganizationPluginConfigurationForm
+
+
+@admin.register(LogEntry)
+class LogEntryAdmin(admin.ModelAdmin):
+    ordering = ["-action_time"]
+    list_display = [
+        "pk",
+        "user",
+        "object_repr",
+        "action_flag",
+        "change_message",
+        "action_time",
+    ]
+    list_filter = ["user", "action_flag", "action_time", "content_type"]
+    search_fields = ["user__username", "object_repr", "change_message"]
+
+    @staticmethod
+    def has_delete_permission(request, obj=None):
+        return False
+
+    @staticmethod
+    def has_add_permission(request):
+        return False
+
+    @staticmethod
+    def has_change_permission(request, obj=None):
+        return False

@@ -8,7 +8,7 @@ import requests
 
 from api_app.analyzers_manager.classes import ObservableAnalyzer
 from api_app.analyzers_manager.exceptions import AnalyzerRunException
-from tests.mock_utils import MockUpResponse, if_mock_connections, patch
+from api_app.choices import Classification
 
 
 class PhishStats(ObservableAnalyzer):
@@ -25,24 +25,24 @@ class PhishStats(ObservableAnalyzer):
     def __build_phishstats_url(self) -> str:
         to_analyze_observable_classification = self.observable_classification
         to_analyze_observable_name = self.observable_name
-        if self.observable_classification == self.ObservableTypes.URL:
+        if self.observable_classification == Classification.URL:
             to_analyze_observable_name = urlparse(self.observable_name).hostname
             try:
                 IPv4Address(to_analyze_observable_name)
             except AddressValueError:
-                to_analyze_observable_classification = self.ObservableTypes.DOMAIN
+                to_analyze_observable_classification = Classification.DOMAIN
             else:
-                to_analyze_observable_classification = self.ObservableTypes.IP
+                to_analyze_observable_classification = Classification.IP
 
-        if to_analyze_observable_classification == self.ObservableTypes.IP:
+        if to_analyze_observable_classification == Classification.IP:
             endpoint = (
                 f"phishing?_where=(ip,eq,{to_analyze_observable_name})&_sort=-date"
             )
-        elif to_analyze_observable_classification == self.ObservableTypes.DOMAIN:
+        elif to_analyze_observable_classification == Classification.DOMAIN:
             endpoint = (
                 f"phishing?_where=(url,like,~{to_analyze_observable_name}~)&_sort=-date"
             )
-        elif to_analyze_observable_classification == self.ObservableTypes.GENERIC:
+        elif to_analyze_observable_classification == Classification.GENERIC:
             endpoint = (
                 "phishing?_where=(title,like,"
                 f"~{to_analyze_observable_name}~)&_sort=-date"
@@ -59,15 +59,3 @@ class PhishStats(ObservableAnalyzer):
         response.raise_for_status()
 
         return {"api_url": api_url, "results": response.json()}
-
-    @classmethod
-    def _monkeypatch(cls):
-        patches = [
-            if_mock_connections(
-                patch(
-                    "requests.get",
-                    return_value=MockUpResponse({}, 200),
-                ),
-            )
-        ]
-        return super()._monkeypatch(patches=patches)

@@ -1,25 +1,28 @@
 # This file is a part of IntelOwl https://github.com/intelowlproject/IntelOwl
 # See the file 'LICENSE' for copying permission.
+import copy
 import datetime
 import logging
 import uuid
 from abc import ABCMeta, abstractmethod
 
+from django.conf import settings
 from django.db.models import Count, Q
 from django.db.models.functions import Trunc
 from django.http import FileResponse
 from django.utils.timezone import now
-from drf_spectacular.types import OpenApiTypes
-from drf_spectacular.utils import extend_schema as add_docs
-from drf_spectacular.utils import inline_serializer
-from rest_framework import serializers as rfs
+from elasticsearch_dsl import Q as QElastic
+from elasticsearch_dsl import Search
 from rest_framework import status, viewsets
 from rest_framework.decorators import action, api_view
 from rest_framework.exceptions import NotFound, PermissionDenied, ValidationError
-from rest_framework.permissions import IsAuthenticated
+from rest_framework.generics import GenericAPIView
+from rest_framework.permissions import IsAdminUser, IsAuthenticated
 from rest_framework.response import Response
 from rest_framework.viewsets import ModelViewSet
 
+from api_app.choices import Classification, ScanMode
+from api_app.exceptions import NotImplementedException
 from api_app.websocket import JobConsumer
 from certego_saas.apps.organization.permissions import (
     IsObjectOwnerOrSameOrgPermission as IsObjectUserOrSameOrgPermission,
@@ -32,9 +35,8 @@ from certego_saas.ext.mixins import SerializerActionMixin
 from certego_saas.ext.viewsets import ReadAndDeleteOnlyViewSet
 from intel_owl import tasks
 from intel_owl.celery import app as celery_app
+from intel_owl.settings._util import get_environment
 
-from .analyzers_manager.constants import ObservableTypes
-from .choices import ObservableClassification
 from .decorators import deprecated_endpoint
 from .filters import JobFilter
 from .mixins import PaginationMixin
@@ -50,6 +52,11 @@ from .models import (
 )
 from .permissions import IsObjectAdminPermission, IsObjectOwnerPermission
 from .pivots_manager.models import PivotConfig
+from .serializers.elastic import (
+    ElasticRequest,
+    ElasticRequestSerializer,
+    ElasticResponseSerializer,
+)
 from .serializers.job import (
     CommentSerializer,
     FileJobSerializer,
@@ -61,7 +68,11 @@ from .serializers.job import (
     RestJobSerializer,
     TagSerializer,
 )
-from .serializers.plugin import PluginConfigSerializer, PythonConfigSerializer
+from .serializers.plugin import (
+    ParameterSerializer,
+    PluginConfigSerializer,
+    PythonConfigSerializer,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -69,25 +80,6 @@ logger = logging.getLogger(__name__)
 # REST API endpoints
 
 
-@add_docs(
-    description="""
-    This is useful to avoid repeating the same analysis multiple times.
-    By default this API checks if there are existing analysis related to the md5 in
-    status "running" or "reported_without_fails"
-    Also, you need to specify the analyzers needed because, otherwise, it is
-    highly probable that you won't get all the results that you expect""",
-    request=JobAvailabilitySerializer,
-    responses={
-        200: inline_serializer(
-            name="AskAnalysisAvailabilitySuccessResponse",
-            fields={
-                "status": rfs.StringRelatedField(),
-                "job_id": rfs.StringRelatedField(),
-                "analyzers_to_execute": OpenApiTypes.OBJECT,
-            },
-        ),
-    },
-)
 @deprecated_endpoint(deprecation_date="01-07-2023")
 @api_view(["POST"])
 def ask_analysis_availability(request):
@@ -122,17 +114,6 @@ def ask_analysis_availability(request):
     )
 
 
-@add_docs(
-    description="""
-    This is useful to avoid repeating the same analysis multiple times.
-    By default this API checks if there are existing analysis related to the md5 in
-    status "running" or "reported_without_fails"
-    Also, you need to specify the analyzers needed because, otherwise, it is
-    highly probable that you won't get all the results that you expect.
-    NOTE: This API is similar to ask_analysis_availability, but it allows multiple
-    md5s to be checked at the same time.""",
-    responses={200: JobAvailabilitySerializer(many=True)},
-)
 @api_view(["POST"])
 def ask_multi_analysis_availability(request):
     """
@@ -167,12 +148,6 @@ def ask_multi_analysis_availability(request):
     )
 
 
-@add_docs(
-    description="This endpoint allows to start a Job related for a single File."
-    " Retained for retro-compatibility",
-    request=FileJobSerializer,
-    responses={200: JobResponseSerializer(many=True)},
-)
 @api_view(["POST"])
 def analyze_file(request):
     """
@@ -181,6 +156,8 @@ def analyze_file(request):
     This endpoint initiates an analysis job for a single file and sends it to the
     specified analyzers. The file-related information and analyzers should be provided
     in the request data.
+
+    Retained for retro-compatibility
 
     Parameters:
     - request (POST): Contains file data and analyzer details.
@@ -200,24 +177,6 @@ def analyze_file(request):
     )
 
 
-@add_docs(
-    description="This endpoint allows to start Jobs related to multiple Files",
-    # It should be better to link the doc to the related MultipleFileAnalysisSerializer.
-    # It is not straightforward because you can't just add a class
-    # which extends a ListSerializer.
-    # Follow this doc to try to find a fix:
-    # https://drf-spectacular.readthedocs.io/en/latest/customization.html#declare-serializer-magic-with
-    # -openapiserializerextension
-    request=inline_serializer(
-        name="MultipleFilesSerializer",
-        fields={
-            "files": rfs.ListField(child=rfs.FileField()),
-            "file_names": rfs.ListField(child=rfs.CharField()),
-            "file_mimetypes": rfs.ListField(child=rfs.CharField()),
-        },
-    ),
-    responses={200: JobResponseSerializer},
-)
 @api_view(["POST"])
 def analyze_multiple_files(request):
     """
@@ -245,12 +204,6 @@ def analyze_multiple_files(request):
     )
 
 
-@add_docs(
-    description="This endpoint allows to start a Job related to an observable. "
-    "Retained for retro-compatibility",
-    request=ObservableAnalysisSerializer,
-    responses={200: JobResponseSerializer},
-)
 @api_view(["POST"])
 def analyze_observable(request):
     """
@@ -259,6 +212,8 @@ def analyze_observable(request):
     This endpoint initiates an analysis job for a single observable (e.g., domain, IP, URL, etc.)
     and sends it to the specified analyzers. The observable-related information and analyzers should be
     provided in the request data.
+
+    Retained for retro-compatibility
 
     Parameters:
     - request (POST): Contains observable data and analyzer details.
@@ -278,20 +233,6 @@ def analyze_observable(request):
     )
 
 
-@add_docs(
-    description="""This endpoint allows to start Jobs related to multiple observables.
-                 Observable parameter must be composed like this:
-                 [(<observable_classification>, <observable_name>), ...]""",
-    request=inline_serializer(
-        name="MultipleObservableSerializer",
-        fields={
-            "observables": rfs.ListField(
-                child=rfs.ListField(max_length=2, min_length=2)
-            )
-        },
-    ),
-    responses={200: JobResponseSerializer},
-)
 @api_view(["POST"])
 def analyze_multiple_observables(request):
     """
@@ -308,10 +249,12 @@ def analyze_multiple_observables(request):
     - 200: JSON response with the job details for each initiated analysis.
     """
     logger.info(f"received analyze_multiple_observables from user {request.user}")
+    logger.debug(f"{request.data=}")
     oas = ObservableAnalysisSerializer(
         data=request.data, many=True, context={"request": request}
     )
     oas.is_valid(raise_exception=True)
+    logger.debug(f"{oas.validated_data=}")
     parent_job = oas.validated_data[0].get("parent_job", None)
     jobs = oas.save(send_task=True, parent=parent_job)
     jrs = JobResponseSerializer(jobs, many=True).data
@@ -322,13 +265,6 @@ def analyze_multiple_observables(request):
     )
 
 
-@add_docs(
-    description="""
-    REST endpoint to fetch list of job comments or
-    retrieve/delete a job comment with job comment ID.
-    Requires authentication.
-    """
-)
 class CommentViewSet(ModelViewSet):
     """
     CommentViewSet provides the following actions:
@@ -386,18 +322,10 @@ class CommentViewSet(ModelViewSet):
         - Filtered queryset of comments.
         """
         queryset = super().get_queryset()
-        jobs = Job.objects.visible_for_user(self.request.user).values_list(
-            "pk", flat=True
-        )
-        return queryset.filter(job__id__in=jobs)
+
+        return queryset.visible_for_user(self.request.user)
 
 
-@add_docs(
-    description="""
-    REST endpoint to fetch list of jobs or retrieve/delete a job with job ID.
-    Requires authentication.
-    """
-)
 class JobViewSet(ReadAndDeleteOnlyViewSet, SerializerActionMixin):
     """
     JobViewSet provides the following actions:
@@ -415,8 +343,9 @@ class JobViewSet(ReadAndDeleteOnlyViewSet, SerializerActionMixin):
     - **aggregate_type**: Aggregate jobs by type (file or observable) over a specified time range.
     - **aggregate_observable_classification**: Aggregate jobs by observable classification over a specified time range.
     - **aggregate_file_mimetype**: Aggregate jobs by file MIME type over a specified time range.
-    - **aggregate_observable_name**: Aggregate jobs by observable name over a specified time range.
-    - **aggregate_md5**: Aggregate jobs by MD5 hash over a specified time range.
+    - **aggregate_top_playbook**: Aggregate jobs by playbook over a specified time range and show the most used.
+    - **aggregate_top_user**: Aggregate jobs by user over a specified time range and show the most used.
+    - **aggregate_top_tlp**: Aggregate jobs by TLP over a specified time range and show the most used.
 
     Permissions:
     - **IsAuthenticated**: Requires authentication for all actions.
@@ -452,7 +381,7 @@ class JobViewSet(ReadAndDeleteOnlyViewSet, SerializerActionMixin):
         - List of applicable permissions.
         """
         permissions = super().get_permissions()
-        if self.action in ["destroy", "kill"]:
+        if self.action in ["destroy", "kill", "rescan"]:
             permissions.append(IsObjectUserOrSameOrgPermission())
         return permissions
 
@@ -487,7 +416,7 @@ class JobViewSet(ReadAndDeleteOnlyViewSet, SerializerActionMixin):
             raise ValidationError({"detail": "md5 is required"})
         max_temporal_distance = request.data.get("max_temporal_distance", 14)
         jobs = (
-            Job.objects.filter(md5=request.data["md5"])
+            Job.objects.filter(analyzable__md5=request.data["md5"])
             .visible_for_user(self.request.user)
             .filter(
                 finished_analysis_time__gte=now()
@@ -515,12 +444,15 @@ class JobViewSet(ReadAndDeleteOnlyViewSet, SerializerActionMixin):
         limit = request.data.get("limit", 5)
         if "is_sample" not in request.data:
             raise ValidationError({"detail": "is_sample is required"})
-        jobs = (
-            Job.objects.filter(user__pk=request.user.pk)
-            .filter(is_sample=request.data["is_sample"])
-            .annotate_importance(request.user)
-            .order_by("-importance", "-finished_analysis_time")[:limit]
-        )
+        is_sample = request.data["is_sample"]
+        jobs = Job.objects.filter(user__pk=request.user.pk)
+        if is_sample == "True":
+            jobs = jobs.filter(analyzable__classification=Classification.FILE)
+        else:
+            jobs = jobs.exclude(analyzable__classification=Classification.FILE)
+        jobs = jobs.annotate_importance(request.user).order_by(
+            "-importance", "-finished_analysis_time"
+        )[:limit]
         return Response(
             JobRecentScanSerializer(jobs, many=True).data, status=status.HTTP_200_OK
         )
@@ -536,18 +468,41 @@ class JobViewSet(ReadAndDeleteOnlyViewSet, SerializerActionMixin):
         - No content (204) if the job is successfully retried.
         """
         job = self.get_object()
-        if job.status not in Job.Status.final_statuses():
+        if job.status not in Job.STATUSES.final_statuses():
             raise ValidationError({"detail": "Job is running"})
         job.retry()
         return Response(status=status.HTTP_204_NO_CONTENT)
 
-    @add_docs(
-        description="Kill running job by closing celery tasks and marking as killed",
-        request=None,
-        responses={
-            204: None,
-        },
-    )
+    @action(detail=True, methods=["post"])
+    def rescan(self, request, pk=None):
+        logger.info(f"rescan request for job: {pk}")
+        existing_job: Job = self.get_object()
+        # create a new job
+        data = {
+            "tlp": existing_job.tlp,
+            "runtime_configuration": existing_job.runtime_configuration,
+            "scan_mode": ScanMode.FORCE_NEW_ANALYSIS,
+        }
+        if existing_job.playbook_requested:
+            data["playbook_requested"] = existing_job.playbook_requested
+        else:
+            data["analyzers_requested"] = existing_job.analyzers_requested.all()
+            data["connectors_requested"] = existing_job.connectors_requested.all()
+        if existing_job.is_sample:
+            data["file"] = existing_job.analyzable.file
+            data["file_name"] = existing_job.analyzable.name
+            job_serializer = FileJobSerializer(data=data, context={"request": request})
+        else:
+            data["observable_classification"] = existing_job.analyzable.classification
+            data["observable_name"] = existing_job.analyzable.name
+            job_serializer = ObservableAnalysisSerializer(
+                data=data, context={"request": request}
+            )
+        job_serializer.is_valid(raise_exception=True)
+        new_job = job_serializer.save(send_task=True)
+        logger.info(f"rescan request for job: {pk} generated job: {new_job.pk}")
+        return Response(data={"id": new_job.pk}, status=status.HTTP_202_ACCEPTED)
+
     @action(detail=True, methods=["patch"])
     def kill(self, request, pk=None):
         """
@@ -562,17 +517,12 @@ class JobViewSet(ReadAndDeleteOnlyViewSet, SerializerActionMixin):
         job = self.get_object()
 
         # check if job running
-        if job.status in Job.Status.final_statuses():
+        if job.status in Job.STATUSES.final_statuses():
             raise ValidationError({"detail": "Job is not running"})
         # close celery tasks and mark reports as killed
         job.kill_if_ongoing()
         return Response(status=status.HTTP_204_NO_CONTENT)
 
-    @add_docs(
-        description="Download file/sample associated with a job",
-        request=None,
-        responses={200: OpenApiTypes.BINARY, 400: None},
-    )
     @action(detail=True, methods=["get"])
     def download_sample(self, request, pk=None):
         """
@@ -595,13 +545,12 @@ class JobViewSet(ReadAndDeleteOnlyViewSet, SerializerActionMixin):
                 {"detail": "Requested job does not have a sample associated with it."}
             )
         return FileResponse(
-            job.file,
-            filename=job.file_name,
-            content_type=job.file_mimetype,
+            job.analyzable.file,
+            filename=job.analyzable.name,
+            content_type=job.analyzable.mimetype,
             as_attachment=True,
         )
 
-    @add_docs(description="Pivot a job")
     @action(
         detail=True, methods=["post"]
     )  # , url_path="pivot-(?P<pivot_config_pk>\d+)")
@@ -656,7 +605,14 @@ class JobViewSet(ReadAndDeleteOnlyViewSet, SerializerActionMixin):
         """
         annotations = {
             key.lower(): Count("status", filter=Q(status=key))
-            for key in Job.Status.values
+            for key in Job.STATUSES.values
+            if key
+            in [
+                Job.STATUSES.PENDING,
+                Job.STATUSES.FAILED,
+                Job.STATUSES.REPORTED_WITH_FAILS,
+                Job.STATUSES.REPORTED_WITHOUT_FAILS,
+            ]
         }
         return self.__aggregation_response_static(
             annotations, users=self.get_org_members(request)
@@ -676,8 +632,12 @@ class JobViewSet(ReadAndDeleteOnlyViewSet, SerializerActionMixin):
         - Aggregated count of jobs for each type.
         """
         annotations = {
-            "file": Count("is_sample", filter=Q(is_sample=True)),
-            "observable": Count("is_sample", filter=Q(is_sample=False)),
+            "file": Count(
+                "pk", filter=Q(analyzable__classification=Classification.FILE.value)
+            ),
+            "observable": Count(
+                "pk", filter=~Q(analyzable__classification=Classification.FILE.value)
+            ),
         }
         return self.__aggregation_response_static(
             annotations, users=self.get_org_members(request)
@@ -698,9 +658,15 @@ class JobViewSet(ReadAndDeleteOnlyViewSet, SerializerActionMixin):
         """
         annotations = {
             oc.lower(): Count(
-                "observable_classification", filter=Q(observable_classification=oc)
+                "analyzable__classification", filter=Q(analyzable__classification=oc)
             )
-            for oc in ObservableTypes.values
+            for oc in [
+                Classification.DOMAIN,
+                Classification.IP,
+                Classification.HASH,
+                Classification.URL,
+                Classification.GENERIC,
+            ]
         }
         return self.__aggregation_response_static(
             annotations, users=self.get_org_members(request)
@@ -720,42 +686,58 @@ class JobViewSet(ReadAndDeleteOnlyViewSet, SerializerActionMixin):
         - Aggregated count of jobs for each MIME type.
         """
         return self.__aggregation_response_dynamic(
-            "file_mimetype", users=self.get_org_members(request)
+            "analyzable__mimetype", users=self.get_org_members(request)
         )
 
     @action(
-        url_path="aggregate/observable_name",
+        url_path="aggregate/top_playbook",
         detail=False,
         methods=["GET"],
     )
     @cache_action_response(timeout=60 * 5)
-    def aggregate_observable_name(self, request):
+    def aggregate_top_playbook(self, request):
         """
-        Aggregate jobs by observable name.
+        Aggregate playbooks by usage.
 
         Returns:
-        - Aggregated count of jobs for each observable name.
+        - Aggregated count of playbooks for each one.
         """
         return self.__aggregation_response_dynamic(
-            "observable_name", False, users=self.get_org_members(request)
+            "playbook_to_execute__name", users=self.get_org_members(request)
         )
 
     @action(
-        url_path="aggregate/md5",
+        url_path="aggregate/top_user",
         detail=False,
         methods=["GET"],
     )
     @cache_action_response(timeout=60 * 5)
-    def aggregate_md5(self, request):
+    def aggregate_top_user(self, request):
         """
-        Aggregate jobs by MD5 hash.
+        Aggregate Users by usage.
 
         Returns:
-        - Aggregated count of jobs for each MD5 hash.
+        - Aggregated count of users for each one.
         """
-        # this is for file
         return self.__aggregation_response_dynamic(
-            "md5", False, users=self.get_org_members(request)
+            "user__username", users=self.get_org_members(request)
+        )
+
+    @action(
+        url_path="aggregate/top_tlp",
+        detail=False,
+        methods=["GET"],
+    )
+    @cache_action_response(timeout=60 * 5)
+    def aggregate_top_tlp(self, request):
+        """
+        Aggregate TLPs by usage.
+
+        Returns:
+        - Aggregated count of TLPs for each one.
+        """
+        return self.__aggregation_response_dynamic(
+            "tlp", users=self.get_org_members(request)
         )
 
     @staticmethod
@@ -836,11 +818,10 @@ class JobViewSet(ReadAndDeleteOnlyViewSet, SerializerActionMixin):
             and the aggregated data.
         """
         delta, basis = self.__parse_range(self.request)
+        logger.debug(f"{delta=}, {basis=}, {users=}")
         filter_kwargs = {"received_request_time__gte": delta}
         if users:
             filter_kwargs["user__in"] = users
-        if field_name == "md5":
-            filter_kwargs["is_sample"] = True
 
         most_frequent_values = (
             Job.objects.filter(**filter_kwargs)
@@ -848,9 +829,9 @@ class JobViewSet(ReadAndDeleteOnlyViewSet, SerializerActionMixin):
             .exclude(**{f"{field_name}__exact": ""})
             # excluding those because they could lead to SQL query errors
             .exclude(
-                observable_classification__in=[
-                    ObservableClassification.URL,
-                    ObservableClassification.GENERIC,
+                analyzable__classification__in=[
+                    Classification.URL,
+                    Classification.GENERIC,
                 ]
             )
             .annotate(count=Count(field_name))
@@ -865,7 +846,9 @@ class JobViewSet(ReadAndDeleteOnlyViewSet, SerializerActionMixin):
 
         if len(most_frequent_values):
             annotations = {
-                val: Count(field_name, filter=Q(**{field_name: val}))
+                val.replace(" ", "")
+                .replace("?", "")
+                .replace(";", ""): Count(field_name, filter=Q(**{field_name: val}))
                 for val in most_frequent_values
             }
             logger.debug(f"request: {field_name} annotations: {annotations}")
@@ -913,12 +896,6 @@ class JobViewSet(ReadAndDeleteOnlyViewSet, SerializerActionMixin):
         return parse_humanized_range(range_str)
 
 
-@add_docs(
-    description="""
-    REST endpoint to perform CRUD operations on ``Tag`` model.
-    Requires authentication.
-    """
-)
 class TagViewSet(viewsets.ModelViewSet):
     """
     A viewset that provides CRUD (Create, Read, Update, Delete) operations
@@ -994,59 +971,6 @@ class ModelWithOwnershipViewSet(viewsets.ModelViewSet):
         return permissions
 
 
-@add_docs(
-    description="""
-    REST endpoint to fetch list of PluginConfig or retrieve/delete a CustomConfig.
-    Requires authentication. Allows access to only authorized CustomConfigs.
-    """
-)
-class PluginConfigViewSet(ModelWithOwnershipViewSet):
-    """
-    A viewset for managing `PluginConfig` objects with ownership-based access control.
-
-    This viewset extends `ModelWithOwnershipViewSet` to handle `PluginConfig` objects,
-    allowing users to list, retrieve, and delete configurations while ensuring that only
-    authorized configurations are accessible. It customizes the queryset to exclude default
-    values and orders the configurations by ID.
-
-    Attributes:
-        serializer_class (class): The serializer class used for `PluginConfig` objects.
-        pagination_class (class): Specifies that pagination is not applied.
-        queryset (QuerySet): The queryset for `PluginConfig` objects, initially set to all objects.
-
-    Methods:
-        get_queryset(): Returns the queryset for `PluginConfig` objects, excluding default values
-                        (where the owner is `NULL`) and ordering the remaining objects by ID.
-    """
-
-    serializer_class = PluginConfigSerializer
-    pagination_class = None
-    queryset = PluginConfig.objects.all()
-
-    def get_queryset(self):
-        """
-        Retrieves the queryset for `PluginConfig` objects, excluding those with default values
-        (where the owner is `NULL`) and ordering the remaining objects by ID.
-
-        Returns:
-            QuerySet: The filtered and ordered queryset of `PluginConfig` objects.
-        """
-        # the .exclude is to remove the default values
-        return super().get_queryset().exclude(owner__isnull=True).order_by("id")
-
-
-@add_docs(
-    description="""This endpoint allows organization owners
-    and members to view plugin state.""",
-    responses={
-        200: inline_serializer(
-            name="PluginStateViewerResponseSerializer",
-            fields={
-                "data": rfs.JSONField(),
-            },
-        ),
-    },
-)
 @api_view(["GET"])
 def plugin_state_viewer(request):
     """
@@ -1174,7 +1098,7 @@ class PythonReportActionViewSet(viewsets.GenericViewSet, metaclass=ABCMeta):
         # kill celery task
         celery_app.control.revoke(report.task_id, terminate=True)
         # update report
-        report.status = AbstractReport.Status.KILLED
+        report.status = AbstractReport.STATUSES.KILLED
         report.save(update_fields=["status"])
         # clean up job
 
@@ -1218,13 +1142,6 @@ class PythonReportActionViewSet(viewsets.GenericViewSet, metaclass=ABCMeta):
         )
         runner()
 
-    @add_docs(
-        description="Kill running plugin by closing celery task and marking as killed",
-        request=None,
-        responses={
-            204: None,
-        },
-    )
     @action(detail=False, methods=["patch"])
     def kill(self, request, job_id, report_id):
         """
@@ -1251,21 +1168,14 @@ class PythonReportActionViewSet(viewsets.GenericViewSet, metaclass=ABCMeta):
         # get report object or raise 404
         report = self.get_object(job_id, report_id)
         if report.status not in [
-            AbstractReport.Status.RUNNING,
-            AbstractReport.Status.PENDING,
+            AbstractReport.STATUSES.RUNNING,
+            AbstractReport.STATUSES.PENDING,
         ]:
             raise ValidationError({"detail": "Plugin is not running or pending"})
 
         self.perform_kill(report)
         return Response(status=status.HTTP_204_NO_CONTENT)
 
-    @add_docs(
-        description="Retry a plugin run if it failed/was killed previously",
-        request=None,
-        responses={
-            204: None,
-        },
-    )
     @action(detail=False, methods=["patch"])
     def retry(self, request, job_id, report_id):
         """
@@ -1287,8 +1197,8 @@ class PythonReportActionViewSet(viewsets.GenericViewSet, metaclass=ABCMeta):
         # get report object or raise 404
         report = self.get_object(job_id, report_id)
         if report.status not in [
-            AbstractReport.Status.FAILED,
-            AbstractReport.Status.KILLED,
+            AbstractReport.STATUSES.FAILED,
+            AbstractReport.STATUSES.KILLED,
         ]:
             raise ValidationError(
                 {"detail": "Plugin status should be failed or killed"}
@@ -1330,11 +1240,6 @@ class AbstractConfigViewSet(
     ordering = ["name"]
     lookup_field = "name"
 
-    @add_docs(
-        description="Disable/Enable plugin for your organization",
-        request=None,
-        responses={201: {}, 202: {}},
-    )
     @action(
         methods=["post"],
         detail=True,
@@ -1430,19 +1335,6 @@ class PythonConfigViewSet(AbstractConfigViewSet):
             "python_module__parameters"
         )
 
-    @add_docs(
-        description="Health Check: "
-        "if server instance associated with plugin is up or not",
-        request=None,
-        responses={
-            200: inline_serializer(
-                name="PluginHealthCheckSuccessResponse",
-                fields={
-                    "status": rfs.BooleanField(allow_null=True),
-                },
-            ),
-        },
-    )
     @action(
         methods=["get"],
         detail=True,
@@ -1525,3 +1417,238 @@ class PythonConfigViewSet(AbstractConfigViewSet):
                     {"detail": "This Plugin has no Update implemented"}
                 )
             return Response(data={"status": update_status}, status=status.HTTP_200_OK)
+
+
+class PluginConfigViewSet(ModelWithOwnershipViewSet):
+    """
+    A viewset for managing `PluginConfig` objects with ownership-based access control.
+
+    This viewset extends `ModelWithOwnershipViewSet` to handle `PluginConfig` objects,
+    allowing users to list, retrieve, and delete configurations while ensuring that only
+    authorized configurations are accessible.
+
+    Attributes:
+        serializer_class (class): The serializer class used for `PluginConfig` objects.
+        pagination_class (class): Specifies that pagination is not applied.
+        queryset (QuerySet): The queryset for `PluginConfig` objects, initially set to all objects.
+    """
+
+    serializer_class = PluginConfigSerializer
+    pagination_class = None
+    queryset = PluginConfig.objects.all()
+
+    def get_permissions(self):
+        permissions = super().get_permissions()
+        if self.action in ["retrieve"]:
+            # code quality checker marks this as error, but it works correctly
+            permissions.append(
+                (  # skipcq: PYL-E1102
+                    IsObjectAdminPermission | IsObjectOwnerPermission
+                )()
+            )
+        return permissions
+
+    @action(
+        methods=["get"],
+        detail=False,
+    )
+    def plugin_config(self, request, name=None):
+        logger.info(f"get plugin_config from user {request.user}, name {name}")
+        obj: PythonConfig = self.get_queryset().get(name=name)
+        try:
+            plugin_configs: PluginConfig = PluginConfig.objects.filter(
+                **{obj.snake_case_name: obj.pk}
+            )
+        except PluginConfig.DoesNotExist:
+            raise NotFound("Requested plugin config does not exist.")
+        else:
+            pc = PluginConfigSerializer(
+                plugin_configs, context={"request": request}, many=True
+            )
+            pp = ParameterSerializer(obj.parameters, many=True)
+            org_config = []
+            user_config = []
+
+            for attribute, param_obj in pp.data.items():
+                param_obj["attribute"] = attribute
+                param_obj["parameter"] = param_obj.pop("id")
+                param_obj["exist"] = False
+                # override default config (if any)
+                for config in [
+                    config
+                    for config in pc.data
+                    if config["owner"] is None and config["attribute"] == attribute
+                ]:
+                    param_obj.update(config)
+                    param_obj["exist"] = True
+                # override default config with org config (if any)
+                if request.user.has_membership():
+                    org = request.user.membership.organization.name
+                    for config in [
+                        config
+                        for config in pc.data
+                        if config["organization"] == org
+                        and config["attribute"] == attribute
+                    ]:
+                        param_obj.update(config)
+                        param_obj["exist"] = True
+                    org_config.append(copy.deepcopy(param_obj))
+                # override default config with user config (if any)
+                print(pc.data)
+                for config in [
+                    config
+                    for config in pc.data
+                    if (
+                        config["owner"] == request.user.username
+                        or (request.user.is_superuser and config["ingestor_config"])
+                    )
+                    and config["organization"] is None
+                    and config["attribute"] == attribute
+                ]:
+                    param_obj.update(config)
+                    param_obj["exist"] = True
+                user_config.append(copy.deepcopy(param_obj))
+
+            result = {"organization_config": org_config, "user_config": user_config}
+            return Response(result, status=status.HTTP_200_OK)
+
+    @plugin_config.mapping.patch
+    def update(self, request, name=None):
+        logger.info(f"patch plugin_config from user {request.user}, name {name}")
+        for data in request.data:
+            try:
+                instance = PluginConfig.objects.get(id=data["id"])
+            except PluginConfig.DoesNotExist:
+                raise PermissionDenied()
+            else:
+                self.check_object_permissions(self.request, instance)
+                serializer = PluginConfigSerializer(instance, data=data, partial=True)
+                serializer.is_valid(raise_exception=True)
+                serializer.save()
+        return Response(status=status.HTTP_200_OK)
+
+    def check_object_permissions(self, request, obj):
+        if obj.ingestor_config:
+            permission = IsAdminUser()
+            if not permission.has_object_permission(request, self, obj):
+                self.permission_denied(
+                    request,
+                    message=getattr(permission, "message", None),
+                    code=getattr(permission, "code", None),
+                )
+        else:
+            super().check_object_permissions(request, obj)
+
+    @plugin_config.mapping.post
+    def create(self, request, name=None):
+        logger.info(f"post plugin_config from user {request.user}, name {name}")
+        serializer = self.get_serializer(
+            data=request.data, context={"request": request}, many=True
+        )
+        serializer.is_valid(raise_exception=True)
+        serializer.save()
+        return Response(serializer.data, status=status.HTTP_201_CREATED)
+
+
+class ElasticSearchView(GenericAPIView):
+
+    def get(self, request):
+        """
+        View enabled only with elastic. Allow to perform queries in the Plugin reports.
+
+        Args:
+            request (HttpRequest): The request object containing the HTTP GET request.
+
+        Returns:
+            Response: A JSON response with the state of each plugin configuration,
+                    indicating whether it is disabled or not.
+
+        Raises:
+            NotImplementedException: Elastic is not configured
+            PermissionDenied: If the requesting user does not belong to any organization.
+        """
+        if not settings.ELASTICSEARCH_DSL_ENABLED:
+            raise NotImplementedException()
+
+        # 1 validate request
+        logger.info(f"{request.query_params=}")
+        elastic_request_serializer = ElasticRequestSerializer(data=request.query_params)
+        elastic_request_serializer.is_valid(raise_exception=True)
+        elastic_request_params: ElasticRequest = elastic_request_serializer.save()
+        logger.debug(f"{elastic_request_params.__dict__=}")
+
+        # 2 generate elasticsearch queries, default filter: object owner or in org
+        permission_filter = QElastic("term", user__username=request.user.username)
+        if request.user.has_membership():
+            permission_filter |= QElastic(
+                "term",
+                membership__organization__name=request.user.membership.organization.name,
+            )
+        filter_list = [permission_filter]
+
+        # additional filters based on request params
+        if elastic_request_params.plugin_name:
+            filter_list.append(
+                QElastic("term", config__plugin_name=elastic_request_params.plugin_name)
+            )
+        if elastic_request_params.name:
+            filter_list.append(
+                QElastic("term", config__name=elastic_request_params.name)
+            )
+        if elastic_request_params.status:
+            filter_list.append(QElastic("term", status=elastic_request_params.status))
+        if elastic_request_params.errors is True:
+            filter_list.append(QElastic("exists", field="errors"))
+        elif elastic_request_params.errors is False:
+            filter_list.append(
+                QElastic("bool", must_not=[QElastic("exists", field="errors")])
+            )
+        if elastic_request_params.start_start_time:
+            filter_list.append(
+                QElastic(
+                    "range", start_time={"gte": elastic_request_params.start_start_time}
+                )
+            )
+        if elastic_request_params.end_start_time:
+            filter_list.append(
+                QElastic(
+                    "range", start_time={"lte": elastic_request_params.end_start_time}
+                )
+            )
+        if elastic_request_params.start_end_time:
+            filter_list.append(
+                QElastic(
+                    "range", end_time={"gte": elastic_request_params.start_end_time}
+                )
+            )
+        if elastic_request_params.end_end_time:
+            filter_list.append(
+                QElastic("range", end_time={"lte": elastic_request_params.end_end_time})
+            )
+        if elastic_request_params.report:
+            filter_list.append(QElastic("term", report=elastic_request_params.report))
+
+        # 3 return data
+        elastic_response = (
+            Search(
+                using=settings.ELASTICSEARCH_DSL_CLIENT,
+                index=f"plugin-report-{get_environment()}*",
+            )
+            .query(QElastic("bool", filter=filter_list))
+            .extra(size=1000)  # max allowed size is 10k
+            .execute()
+        )
+        logger.info(f"filters: {filter_list}, total hits: {len(elastic_response)}")
+        serialize_response = ElasticResponseSerializer(
+            data=self.paginate_queryset(
+                queryset=[hit.to_dict() for hit in elastic_response]
+            ),
+            many=True,
+        )
+        serialize_response.is_valid(raise_exception=True)
+        serialized_data_response = serialize_response.data
+        logger.debug(f"{serialized_data_response=}")
+        logger.debug(
+            f"{[str(e['job']['id']) + '-' + e['config']['name'] for e in serialized_data_response]}"
+        )
+        return self.get_paginated_response(serialized_data_response)

@@ -8,7 +8,7 @@ from api_app.analyzers_manager.exceptions import (
     AnalyzerConfigurationException,
     AnalyzerRunException,
 )
-from tests.mock_utils import MockUpResponse, if_mock_connections, patch
+from api_app.choices import Classification
 
 
 class Threatstream(classes.ObservableAnalyzer):
@@ -46,9 +46,9 @@ class Threatstream(classes.ObservableAnalyzer):
             params = {"type": "confidence", "value": self.observable_name}
             uri = "v1/inteldetails/confidence_trend/"
         elif self.threatstream_analysis == "passive_dns":
-            if self.observable_classification == self.ObservableTypes.IP:
+            if self.observable_classification == Classification.IP:
                 uri = f"v1/pdns/ip/{self.observable_name}"
-            elif self.observable_classification == self.ObservableTypes.DOMAIN:
+            elif self.observable_classification == Classification.DOMAIN:
                 uri = f"v1/pdns/domain/{self.observable_name}"
             else:
                 raise AnalyzerConfigurationException(
@@ -70,15 +70,3 @@ class Threatstream(classes.ObservableAnalyzer):
             raise AnalyzerRunException(e)
         result = response.json()
         return result
-
-    @classmethod
-    def _monkeypatch(cls):
-        patches = [
-            if_mock_connections(
-                patch(
-                    "requests.get",
-                    return_value=MockUpResponse({}, 200),
-                ),
-            )
-        ]
-        return super()._monkeypatch(patches=patches)

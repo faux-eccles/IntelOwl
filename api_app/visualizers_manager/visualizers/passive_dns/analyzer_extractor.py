@@ -83,7 +83,7 @@ def extract_threatminer_reports(
                 report.get("first_seen").split(" ")[0],
                 "A",
                 report.get("ip", None) or report.get("domain", None),
-                job.observable_name,
+                job.analyzable.name,
                 threatminer_analyzer.config.name.replace("_", " "),
                 threatminer_analyzer.config.description,
             )
@@ -178,20 +178,21 @@ def extract_robtex_reports(analyzer_reports: QuerySet, job: Job) -> List[PDNSRep
         robtex_reports = robtex_analyzer.report
         pdns_reports = []
         for report in robtex_reports:
-            pdns_report = PDNSReport(
-                datetime.datetime.fromtimestamp(report.get("time_last")).strftime(
-                    "%Y-%m-%d"
-                ),
-                datetime.datetime.fromtimestamp(report.get("time_first")).strftime(
-                    "%Y-%m-%d"
-                ),
-                report.get("rrtype"),
-                report.get("rrdata"),
-                report.get("rrname"),
-                robtex_analyzer.config.name.replace("_", " "),
-                robtex_analyzer.config.description,
-            )
-            pdns_reports.append(pdns_report)
+            if "rrdata" in report.keys():
+                pdns_report = PDNSReport(
+                    datetime.datetime.fromtimestamp(report.get("time_last")).strftime(
+                        "%Y-%m-%d"
+                    ),
+                    datetime.datetime.fromtimestamp(report.get("time_first")).strftime(
+                        "%Y-%m-%d"
+                    ),
+                    report.get("rrtype"),
+                    report.get("rrdata"),
+                    report.get("rrname"),
+                    robtex_analyzer.config.name.replace("_", " "),
+                    robtex_analyzer.config.description,
+                )
+                pdns_reports.append(pdns_report)
         return pdns_reports
     return []
 

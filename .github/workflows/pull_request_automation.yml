@@ -16,10 +16,10 @@ jobs:
     outputs:
       frontend: ${{steps.diff_check.outputs.frontend}}
     steps:
-      - uses: actions/checkout@v4.1.0
+      - uses: actions/checkout@v4.2.2
         with:
           ref: ${{ github.base_ref }}
-      - uses: actions/checkout@v4.1.0
+      - uses: actions/checkout@v4.2.2
         with:
           clean: false
       - name: Generate diffs
@@ -34,10 +34,10 @@ jobs:
 
     steps:
       - name: Checkout IntelOwl
-        uses: actions/checkout@v4.1.0
+        uses: actions/checkout@v4.2.2
 
       - name: Set up Python
-        uses: actions/setup-python@v5.1.0
+        uses: actions/setup-python@v5.4.0
         with:
           python-version: 3.11
 
@@ -57,6 +57,9 @@ jobs:
       - name: isort
         run: |
           isort . --profile black --filter-files --check-only --diff --skip configuration/ldap_config.py
+      
+      - name: Perform ShellCheck Analysis
+        run: bash <(curl -s https://raw.githubusercontent.com/CICDToolbox/shellcheck/master/pipeline.sh)
 
   backend-tests:
     runs-on: ubuntu-latest
@@ -69,7 +72,7 @@ jobs:
           access_token: ${{ github.token }}
 
       - name: Checkout IntelOwl
-        uses: actions/checkout@v4.1.0
+        uses: actions/checkout@v4.2.2
 
       - name: Prepare Launch
         run: |
@@ -112,6 +115,9 @@ jobs:
       - name: Run test
         run: |
           docker exec intelowl_uwsgi coverage run manage.py test --keepdb tests
+      - name: Run async tests
+        run: |
+          docker exec intelowl_uwsgi coverage run manage.py test --keepdb async_tests
 
   frontend-tests:
     runs-on: ubuntu-latest
@@ -119,11 +125,11 @@ jobs:
     if: ${{ needs.detect-changes.outputs.frontend > 0 }}
 
     steps:
-      - uses: actions/checkout@v4.1.0
+      - uses: actions/checkout@v4.2.2
       - name: Set up NodeJS
         uses: actions/setup-node@v4
         with:
-          node-version: 15
+          node-version: 18
       - name: Cache node modules
         uses: actions/cache@v4
         with:

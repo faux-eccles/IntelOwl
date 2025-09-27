@@ -7,6 +7,7 @@ from typing import Any, Dict, List, Tuple, Type, Union
 
 from django.db.models import QuerySet
 
+from api_app.analyzers_manager.models import MimeTypes
 from api_app.choices import PythonModuleBasePaths
 from api_app.classes import Plugin
 from api_app.models import AbstractReport
@@ -88,8 +89,11 @@ class VisualizableBase(VisualizableObject):
         self.icon = icon
         self.bold = bold
         self.italic = italic
-        self.copy_text = copy_text or value
         self.description = description
+        if link:
+            self.copy_text = copy_text or link
+        else:
+            self.copy_text = copy_text or value
 
     @property
     def attributes(self) -> List[str]:
@@ -139,6 +143,50 @@ class VisualizableTitle(VisualizableObject):
     @property
     def type(self) -> str:
         return "title"
+
+
+class VisualizableDownload(VisualizableObject):
+
+    def __init__(
+        self,
+        value: str,
+        payload: str,
+        alignment: VisualizableAlignment = VisualizableAlignment.CENTER,
+        size: VisualizableSize = VisualizableSize.S_AUTO,
+        disable: bool = False,
+        copy_text: str = "",
+        description: str = "",
+        add_metadata_in_description: bool = True,
+        link: str = "",
+    ):
+        # assignments
+        super().__init__(size, alignment, disable)
+        self.value = value
+        self.payload = payload
+        self.copy_text = copy_text
+        self.description = description
+        self.add_metadata_in_description = add_metadata_in_description
+        self.link = link
+        # logic
+        self.mimetype = MimeTypes.calculate(
+            self.payload, self.value
+        )  # needed as field from the frontend
+
+    @property
+    def type(self) -> str:
+        return "download"
+
+    @property
+    def attributes(self) -> List[str]:
+        return super().attributes + [
+            "value",
+            "mimetype",
+            "payload",
+            "copy_text",
+            "description",
+            "add_metadata_in_description",
+            "link",
+        ]
 
 
 class VisualizableBool(VisualizableBase):
@@ -489,17 +537,23 @@ class Visualizer(Plugin, metaclass=abc.ABCMeta):
         report.save()
         return report
 
-    def analyzer_reports(self) -> QuerySet:
+    def get_analyzer_reports(self) -> QuerySet:
         from api_app.analyzers_manager.models import AnalyzerReport
 
         return AnalyzerReport.objects.filter(job=self._job)
 
-    def connector_reports(self) -> QuerySet:
+    def get_connector_reports(self) -> QuerySet:
         from api_app.connectors_manager.models import ConnectorReport
 
         return ConnectorReport.objects.filter(job=self._job)
 
-    def pivots_reports(self) -> QuerySet:
+    def get_pivots_reports(self) -> QuerySet:
         from api_app.pivots_manager.models import PivotReport
 
         return PivotReport.objects.filter(job=self._job)
+
+    def get_data_models(self) -> QuerySet:
+
+        data_model_class = self._job.analyzable.get_data_model_class()
+        analyzer_reports_pk = [report.pk for report in self.get_analyzer_reports()]
+        return data_model_class.objects.filter(analyzers_report__in=analyzer_reports_pk)

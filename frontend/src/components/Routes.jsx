@@ -2,9 +2,10 @@ import React, { Suspense } from "react";
 import { FallBackLoading } from "@certego/certego-ui";
 import { Navigate, useParams } from "react-router-dom";
 
+import { format } from "date-fns";
 import AuthGuard from "../wrappers/AuthGuard";
 import IfAuthRedirectGuard from "../wrappers/IfAuthRedirectGuard";
-import { JobResultSections } from "../constants/miscConst";
+import { datetimeFormatStr, JobResultSections } from "../constants/miscConst";
 
 const Home = React.lazy(() => import("./home/Home"));
 const Login = React.lazy(() => import("./auth/Login"));
@@ -21,12 +22,43 @@ const CommentResult = React.lazy(
 const PluginsContainer = React.lazy(() => import("./plugins/PluginsContainer"));
 const Dashboard = React.lazy(() => import("./dashboard/Dashboard"));
 const ScanForm = React.lazy(() => import("./scan/ScanForm"));
-const UserConfig = React.lazy(() => import("./user/config/UserConfig"));
 const ChangePassword = React.lazy(() => import("./auth/ChangePassword"));
 const InvestigationResult = React.lazy(
   () => import("./investigations/result/InvestigationResult"),
 );
-const History = React.lazy(() => import("./History"));
+const History = React.lazy(() => import("./history/History"));
+const ReportsSearch = React.lazy(() => import("./search/ReportsSearch"));
+const Analyzables = React.lazy(() => import("./analyzables/Analyzables"));
+const AnalyzableResult = React.lazy(
+  () => import("./analyzables/result/AnalyzableResult"),
+);
+
+function CustomRedirect() {
+  /* this is a way to auto-redirect to the job page with the current date:
+   * we cannot use a button -> change the UI
+   * we cannot use a navigate -> "to" props must have a string (no function) and if we worte new Date in the to url the components is generated once so the first date is keep
+   */
+  const [endDatetime, forceUpdate] = React.useState(new Date());
+
+  React.useEffect(() => {
+    forceUpdate(new Date());
+  }, []);
+
+  const startDatetime = structuredClone(endDatetime);
+  startDatetime.setDate(startDatetime.getDate() - 7);
+
+  return (
+    <Navigate
+      to={`/history/jobs?received_request_time__gte=${encodeURIComponent(
+        format(startDatetime, datetimeFormatStr),
+      )}&received_request_time__lte=${encodeURIComponent(
+        format(endDatetime, datetimeFormatStr),
+      )}&ordering=-received_request_time`}
+      replace
+    />
+  );
+}
+
 /*
 lazy imports to enable code splitting
 */
@@ -110,15 +142,6 @@ const authRoutesLazy = [
       </Suspense>
     ),
   },
-  /* CustomConfig */
-  {
-    path: "/me/config/*",
-    element: (
-      <Suspense fallback={<FallBackLoading />}>
-        <UserConfig />
-      </Suspense>
-    ),
-  },
   /* API Access */
   {
     path: "/me/api",
@@ -167,9 +190,48 @@ const authRoutesLazy = [
       </Suspense>
     ),
   },
-  /* History */
   {
-    path: "/history/*",
+    path: "/history",
+    element: (
+      <Suspense fallback={<FallBackLoading />}>
+        <CustomRedirect />
+      </Suspense>
+    ),
+  },
+  {
+    path: "/history/jobs",
+    element: (
+      <Suspense fallback={<FallBackLoading />}>
+        <History />
+      </Suspense>
+    ),
+  },
+  {
+    path: "/history/investigations",
+    element: (
+      <Suspense fallback={<FallBackLoading />}>
+        <History />
+      </Suspense>
+    ),
+  },
+  {
+    path: "/history/user-events",
+    element: (
+      <Suspense fallback={<FallBackLoading />}>
+        <History />
+      </Suspense>
+    ),
+  },
+  {
+    path: "/history/user-domain-wildcard-events",
+    element: (
+      <Suspense fallback={<FallBackLoading />}>
+        <History />
+      </Suspense>
+    ),
+  },
+  {
+    path: "/history/user-ip-wildcard-events",
     element: (
       <Suspense fallback={<FallBackLoading />}>
         <History />
@@ -187,7 +249,51 @@ const authRoutesLazy = [
   },
   /* Plugins */
   {
-    path: "/plugins/*",
+    path: "/plugins",
+    element: <Navigate to="/plugins/analyzers" replace />,
+  },
+  {
+    path: "/plugins/analyzers",
+    element: (
+      <Suspense fallback={<FallBackLoading />}>
+        <PluginsContainer />
+      </Suspense>
+    ),
+  },
+  {
+    path: "/plugins/connectors",
+    element: (
+      <Suspense fallback={<FallBackLoading />}>
+        <PluginsContainer />
+      </Suspense>
+    ),
+  },
+  {
+    path: "/plugins/pivots",
+    element: (
+      <Suspense fallback={<FallBackLoading />}>
+        <PluginsContainer />
+      </Suspense>
+    ),
+  },
+  {
+    path: "/plugins/visualizers",
+    element: (
+      <Suspense fallback={<FallBackLoading />}>
+        <PluginsContainer />
+      </Suspense>
+    ),
+  },
+  {
+    path: "/plugins/ingestors",
+    element: (
+      <Suspense fallback={<FallBackLoading />}>
+        <PluginsContainer />
+      </Suspense>
+    ),
+  },
+  {
+    path: "/plugins/playbooks",
     element: (
       <Suspense fallback={<FallBackLoading />}>
         <PluginsContainer />
@@ -209,6 +315,32 @@ const authRoutesLazy = [
     element: (
       <Suspense fallback={<FallBackLoading />}>
         <ScanForm />
+      </Suspense>
+    ),
+  },
+  /* Search */
+  {
+    path: "/search",
+    element: (
+      <Suspense fallback={<FallBackLoading />}>
+        <ReportsSearch />
+      </Suspense>
+    ),
+  },
+  /* Analyzables */
+  {
+    path: "/artifacts",
+    element: (
+      <Suspense fallback={<FallBackLoading />}>
+        <Analyzables />
+      </Suspense>
+    ),
+  },
+  {
+    path: `/artifacts/:id`,
+    element: (
+      <Suspense fallback={<FallBackLoading />}>
+        <AnalyzableResult />
       </Suspense>
     ),
   },

@@ -8,7 +8,7 @@ from requests.auth import HTTPBasicAuth
 
 from api_app.analyzers_manager import classes
 from api_app.analyzers_manager.exceptions import AnalyzerRunException
-from tests.mock_utils import MockUpResponse, if_mock_connections, patch
+from api_app.choices import Classification
 
 
 class XForce(classes.ObservableAnalyzer):
@@ -31,7 +31,7 @@ class XForce(classes.ObservableAnalyzer):
         endpoints = self._get_endpoints()
         result = {}
         for endpoint in endpoints:
-            if self.observable_classification == self.ObservableTypes.URL:
+            if self.observable_classification == Classification.URL:
                 observable_to_check = quote_plus(self.observable_name)
             else:
                 observable_to_check = self.observable_name
@@ -45,9 +45,9 @@ class XForce(classes.ObservableAnalyzer):
                 response.raise_for_status()
             result[endpoint] = response.json()
             path = self.observable_classification
-            if self.observable_classification == self.ObservableTypes.DOMAIN:
-                path = self.ObservableTypes.URL
-            elif self.observable_classification == self.ObservableTypes.HASH:
+            if self.observable_classification == Classification.DOMAIN:
+                path = Classification.URL
+            elif self.observable_classification == Classification.HASH:
                 path = "malware"
             result[endpoint]["link"] = f"{self.web_url}/{path}/{observable_to_check}"
 
@@ -60,15 +60,15 @@ class XForce(classes.ObservableAnalyzer):
         :rtype: list
         """
         endpoints = []
-        if self.observable_classification == self.ObservableTypes.IP:
+        if self.observable_classification == Classification.IP:
             if not self.malware_only:
                 endpoints.extend(["ipr", "ipr/history"])
             endpoints.append("ipr/malware")
-        elif self.observable_classification == self.ObservableTypes.HASH:
+        elif self.observable_classification == Classification.HASH:
             endpoints.append("malware")
         elif self.observable_classification in [
-            self.ObservableTypes.URL,
-            self.ObservableTypes.DOMAIN,
+            Classification.URL,
+            Classification.DOMAIN,
         ]:
             if not self.malware_only:
                 endpoints.extend(["url", "url/history"])
@@ -79,15 +79,3 @@ class XForce(classes.ObservableAnalyzer):
             )
 
         return endpoints
-
-    @classmethod
-    def _monkeypatch(cls):
-        patches = [
-            if_mock_connections(
-                patch(
-                    "requests.get",
-                    return_value=MockUpResponse({}, 200),
-                ),
-            )
-        ]
-        return super()._monkeypatch(patches=patches)

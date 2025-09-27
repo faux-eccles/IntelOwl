@@ -2,9 +2,10 @@ import logging
 from typing import Dict
 
 import requests
+from requests import HTTPError
 
 from api_app.analyzers_manager import classes
-from tests.mock_utils import MockUpResponse, if_mock_connections, patch
+from api_app.choices import Classification
 
 from .criminalip_base import CriminalIpBase
 
@@ -24,12 +25,14 @@ class CriminalIp(classes.ObservableAnalyzer, CriminalIpBase):
         resp = requests.get(url, headers=self.getHeaders(), params=params)
         resp.raise_for_status()
         resp = resp.json()
+        if resp.get("status", None) not in [None, 200]:
+            raise HTTPError(resp.get("message", ""))
         logger.info(f"response from CriminalIp for {self.observable_name} -> {resp}")
         return resp
 
     def run(self):
         URLs = {
-            self.ObservableTypes.IP.value: {
+            Classification.IP.value: {
                 "endpoints": {
                     "malicious_info": "/v1/feature/ip/malicious-info",
                     "privacy_threat": "/v1/feature/ip/privacy-threat",
@@ -38,13 +41,13 @@ class CriminalIp(classes.ObservableAnalyzer, CriminalIpBase):
                 },
                 "params": {"ip": self.observable_name},
             },
-            self.ObservableTypes.DOMAIN.value: {
+            Classification.DOMAIN.value: {
                 "endpoints": {
                     "hash_view": "/v1/domain/quick/hash/view",
                 },
                 "params": {"domain": self.observable_name},
             },
-            self.ObservableTypes.GENERIC.value: {
+            Classification.GENERIC.value: {
                 "endpoints": {
                     "banner_search": "/v1/banner/search",
                     "banner_stats": "/v1/banner/stats",
@@ -65,28 +68,3 @@ class CriminalIp(classes.ObservableAnalyzer, CriminalIpBase):
                 )
 
         return resp
-
-    @classmethod
-    def _monkeypatch(cls):
-        patches = [
-            if_mock_connections(
-                patch(
-                    "requests.get",
-                    return_value=MockUpResponse(
-                        {
-                            "data": {
-                                "call_count": 0,
-                                "domain": "example.com",
-                                "reg_dtime": "2023-07-04 05:40:02",
-                                "result": "safe",
-                                "type": "trusted-domain",
-                            },
-                            "message": "api success",
-                            "status": 200,
-                        },
-                        200,
-                    ),
-                )
-            )
-        ]
-        return super()._monkeypatch(patches=patches)

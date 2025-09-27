@@ -9,7 +9,6 @@ from django.conf import settings
 
 from api_app.analyzers_manager import classes
 from api_app.analyzers_manager.exceptions import AnalyzerRunException
-from tests.mock_utils import MockUpResponse, if_mock_connections, patch
 
 logger = logging.getLogger(__name__)
 
@@ -20,9 +19,8 @@ database_location = f"{settings.MEDIA_ROOT}/{db_name}"
 class Talos(classes.ObservableAnalyzer):
     def run(self):
         result = {"found": False}
-        if not os.path.isfile(database_location):
-            if not self.update():
-                raise AnalyzerRunException("Failed extraction of talos db")
+        if not os.path.isfile(database_location) and not self.update():
+            raise AnalyzerRunException("Failed extraction of talos db")
 
         if not os.path.exists(database_location):
             raise AnalyzerRunException(
@@ -58,14 +56,14 @@ class Talos(classes.ObservableAnalyzer):
 
         return False
 
-    @classmethod
-    def _monkeypatch(cls):
-        patches = [
-            if_mock_connections(
-                patch(
-                    "requests.get",
-                    return_value=MockUpResponse({}, 200, content=b"91.192.100.61"),
-                ),
+    def _do_create_data_model(self):
+        return super()._do_create_data_model()
+
+    def _update_data_model(self, data_model):
+        super()._update_data_model(data_model)
+        found = self.report.report.get("found", False)
+        if found:
+            data_model.external_references.append(
+                f"https://www.talosintelligence.com/reputation_center/lookup?search={self.report.job.analyzable.name}"
             )
-        ]
-        return super()._monkeypatch(patches=patches)
+            data_model.evaluation = self.EVALUATIONS.MALICIOUS.value

@@ -5,11 +5,12 @@ from typing import Type
 
 from django import dispatch
 from django.conf import settings
+from django.contrib.admin.models import LogEntry
 from django.db import models
 from django.dispatch import receiver
 
 from api_app.decorators import prevent_signal_recursion
-from api_app.helpers import calculate_md5
+from api_app.investigations_manager.models import Investigation
 from api_app.models import (
     Job,
     ListCachable,
@@ -22,25 +23,6 @@ from api_app.models import (
 migrate_finished = dispatch.Signal()
 
 logger = logging.getLogger(__name__)
-
-
-@receiver(models.signals.pre_save, sender=Job)
-def pre_save_job(sender, instance: Job, **kwargs):
-    """
-    Signal receiver for the pre_save signal of the Job model.
-    Calculates the MD5 hash for the job file or observable name if not already set.
-
-    Args:
-        sender (Model): The model class sending the signal.
-        instance (Job): The instance of the model being saved.
-        **kwargs: Additional keyword arguments.
-    """
-    if not instance.md5:
-        instance.md5 = calculate_md5(
-            instance.file.read()
-            if instance.is_sample
-            else instance.observable_name.encode("utf-8")
-        )
 
 
 @receiver(models.signals.post_save, sender=Job)
@@ -61,21 +43,6 @@ def post_save_job(sender, instance: Job, *args, **kwargs):
         instance.process_time = round(td.total_seconds(), 2)
 
 
-@receiver(models.signals.pre_delete, sender=Job)
-def pre_delete_job(sender, instance: Job, **kwargs):
-    """
-    Signal receiver for the pre_delete signal of the Job model.
-    Deletes the associated file if it exists.
-
-    Args:
-        sender (Model): The model class sending the signal.
-        instance (Job): The instance of the model being deleted.
-        **kwargs: Additional keyword arguments.
-    """
-    if instance.file:
-        instance.file.delete()
-
-
 @receiver(models.signals.post_delete, sender=Job)
 def post_delete_job(sender, instance: Job, **kwargs):
     """
@@ -87,8 +54,13 @@ def post_delete_job(sender, instance: Job, **kwargs):
         instance (Job): The instance of the model being deleted.
         **kwargs: Additional keyword arguments.
     """
-    if instance.investigation and instance.investigation.jobs.count() == 0:
-        instance.investigation.delete()
+    # Try/catch is needed for multiple delete of jobs in the same investigation
+    # because the signals is called _after_ every deletion
+    try:
+        if instance.investigation_id and instance.investigation.jobs.count() == 0:
+            instance.investigation.delete()
+    except Investigation.DoesNotExist:
+        pass
 
 
 @receiver(migrate_finished)
@@ -260,6 +232,7 @@ def post_save_python_config_cache(sender, instance, *args, **kwargs):
     """
     Signal receiver for the post_save signal.
     Deletes class cache keys for instances of ListCachable models.
+    Refreshes cache keys associated with the PythonConfig instance.
 
     Args:
         sender (Model): The model class sending the signal.
@@ -269,13 +242,16 @@ def post_save_python_config_cache(sender, instance, *args, **kwargs):
     """
     if issubclass(sender, ListCachable):
         instance.delete_class_cache_keys()
+    if issubclass(sender, PythonConfig):
+        instance.refresh_cache_keys()
 
 
 @receiver(models.signals.post_delete)
-def post_delete_python_config_cache(sender, instance, using, origin, *args, **kwargs):
+def post_delete_python_config_cache(sender, instance, *args, **kwargs):
     """
     Signal receiver for the post_delete signal.
     Deletes class cache keys for instances of ListCachable models after deletion.
+    Refreshes cache keys associated with the PythonConfig instance after deletion.
 
     Args:
         sender (Model): The model class sending the signal.
@@ -287,3 +263,20 @@ def post_delete_python_config_cache(sender, instance, using, origin, *args, **kw
     """
     if issubclass(sender, ListCachable):
         instance.delete_class_cache_keys()
+    if issubclass(sender, PythonConfig):
+        instance.refresh_cache_keys()
+
+
+@receiver(models.signals.post_save, sender=LogEntry)
+def post_save_log_entry(sender, instance: LogEntry, *args, **kwargs):
+    """
+    Signal receiver for the post_save signal.
+    Add a line of log
+
+    Args:
+        sender (Model): The model class sending the signal.
+        instance: The instance of the model being saved.
+        *args: Additional positional arguments.
+        **kwargs: Additional keyword arguments.
+    """
+    logger.info(str(instance))

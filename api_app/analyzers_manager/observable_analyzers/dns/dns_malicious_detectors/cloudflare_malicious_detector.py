@@ -9,7 +9,7 @@ import requests
 
 from api_app.analyzers_manager import classes
 from api_app.analyzers_manager.exceptions import AnalyzerRunException
-from tests.mock_utils import MockUpResponse, if_mock_connections, patch
+from api_app.choices import Classification
 
 from ..dns_responses import malicious_detector_response
 
@@ -24,7 +24,7 @@ class CloudFlareMaliciousDetector(classes.ObservableAnalyzer):
             is_malicious = False
             observable = self.observable_name
             # for URLs we are checking the relative domain
-            if self.observable_classification == self.ObservableTypes.URL:
+            if self.observable_classification == Classification.URL:
                 observable = urlparse(self.observable_name).hostname
 
             params = {
@@ -51,15 +51,3 @@ class CloudFlareMaliciousDetector(classes.ObservableAnalyzer):
             raise AnalyzerRunException("Connection to CloudFlare failed")
 
         return malicious_detector_response(self.observable_name, is_malicious)
-
-    @classmethod
-    def _monkeypatch(cls):
-        patches = [
-            if_mock_connections(
-                patch(
-                    "requests.get",
-                    return_value=MockUpResponse({"Answer": [{"data": "0.0.0.0"}]}, 200),
-                ),
-            )
-        ]
-        return super()._monkeypatch(patches=patches)

@@ -10,7 +10,7 @@ from requests import HTTPError
 
 from api_app.analyzers_manager.classes import FileAnalyzer
 from api_app.analyzers_manager.exceptions import AnalyzerRunException
-from tests.mock_utils import MagicMock, if_mock_connections, patch
+from tests.mock_utils import MagicMock
 
 logger = logging.getLogger(__name__)
 
@@ -90,7 +90,7 @@ class MWDB_Scan(FileAnalyzer):
     def run(self):
         result = {}
         binary = self.read_file_bytes()
-        query = self._job.sha256
+        query = self._job.analyzable.sha256
         self.mwdb = mwdblib.MWDB(api_key=self._api_key_name)
 
         if self.upload_file:
@@ -112,7 +112,7 @@ class MWDB_Scan(FileAnalyzer):
         else:
             try:
                 file_info = self.mwdb.query_file(query)
-            except HTTPError:
+            except (HTTPError, mwdblib.exc.ObjectNotFoundError):
                 result["not_found"] = True
                 return result
             else:
@@ -127,10 +127,3 @@ class MWDB_Scan(FileAnalyzer):
         )
 
         return result
-
-    @classmethod
-    def _monkeypatch(cls):
-        patches = [
-            if_mock_connections(patch("mwdblib.MWDB", return_value=MockUpMWDB()))
-        ]
-        return super()._monkeypatch(patches=patches)

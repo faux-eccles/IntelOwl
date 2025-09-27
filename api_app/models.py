@@ -1,6 +1,5 @@
 # This file is a part of IntelOwl https://github.com/intelowlproject/IntelOwl
 # See the file 'LICENSE' for copying permission.
-import base64
 import datetime
 import json
 import logging
@@ -14,6 +13,8 @@ from django.utils.timezone import now
 from django_celery_beat.models import ClockedSchedule, CrontabSchedule, PeriodicTask
 from treebeard.mp_tree import MP_Node
 
+from api_app.analyzables_manager.models import Analyzable
+from api_app.data_model_manager.queryset import BaseDataModelQuerySet
 from api_app.interfaces import OwnershipAbstractModel
 
 if TYPE_CHECKING:
@@ -35,7 +36,6 @@ from django.utils.module_loading import import_string
 
 from api_app.choices import (
     TLP,
-    ObservableClassification,
     ParamTypes,
     PythonModuleBasePaths,
     ReportStatus,
@@ -46,11 +46,12 @@ from api_app.choices import (
 if typing.TYPE_CHECKING:
     from api_app.classes import Plugin
 
-from api_app.defaults import default_runtime, file_directory_path
-from api_app.helpers import calculate_sha1, calculate_sha256, deprecated, get_now
+from api_app.defaults import default_runtime
+from api_app.helpers import deprecated, get_now
 from api_app.queryset import (
     AbstractConfigQuerySet,
     AbstractReportQuerySet,
+    CommentQuerySet,
     JobQuerySet,
     OrganizationPluginConfigurationQuerySet,
     ParameterQuerySet,
@@ -285,17 +286,19 @@ class Comment(models.Model):
         related_name="comment",
     )
 
-    class Meta:
-        ordering = ["created_at"]
-
-    job = models.ForeignKey(
-        "Job",
+    analyzable = models.ForeignKey(
+        "analyzables_manager.Analyzable",
         on_delete=models.CASCADE,
         related_name="comments",
     )
     content = models.TextField()
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)
+
+    objects = CommentQuerySet.as_manager()
+
+    class Meta:
+        ordering = ["created_at"]
 
 
 class Job(MP_Node):
@@ -325,9 +328,9 @@ class Job(MP_Node):
 
     class Meta:
         indexes = [
+            models.Index(fields=["data_model_content_type", "data_model_object_id"]),
             models.Index(
                 fields=[
-                    "md5",
                     "status",
                 ]
             ),
@@ -338,11 +341,14 @@ class Job(MP_Node):
             models.Index(
                 fields=["sent_to_bi", "-received_request_time"], name="JobBISearch"
             ),
+            # SELECT COUNT(*) AS "__count" FROM "api_app_job"
+            # WHERE ("api_app_job"."depth" >= ? AND "api_app_job"."path"::text LIKE ? AND NOT ("api_app_job"."id" = ?))
+            models.Index(fields=["depth", "path", "id"], name="MPNodeSearch"),
         ]
 
     # constants
     TLP = TLP
-    Status = Status
+    STATUSES = Status
     investigation = models.ForeignKey(
         "investigations_manager.Investigation",
         on_delete=models.PROTECT,
@@ -356,16 +362,13 @@ class Job(MP_Node):
         on_delete=models.CASCADE,
         null=True,  # for backwards compatibility
     )
-    is_sample = models.BooleanField(blank=False, default=False)
-    md5 = models.CharField(max_length=32, blank=False)
-    observable_name = models.CharField(max_length=512, blank=True)
-    observable_classification = models.CharField(
-        max_length=12, blank=True, choices=ObservableClassification.choices
+
+    analyzable = models.ForeignKey(
+        Analyzable, related_name="jobs", on_delete=models.CASCADE
     )
-    file_name = models.CharField(max_length=512, blank=True)
-    file_mimetype = models.CharField(max_length=80, blank=True)
+
     status = models.CharField(
-        max_length=32, blank=False, choices=Status.choices, default="pending"
+        max_length=32, blank=False, choices=STATUSES.choices, default="pending"
     )
 
     analyzers_requested = models.ManyToManyField(
@@ -420,7 +423,6 @@ class Job(MP_Node):
     warnings = pg_fields.ArrayField(
         models.TextField(), blank=True, default=list, null=True
     )
-    file = models.FileField(blank=True, upload_to=file_directory_path)
     tags = models.ManyToManyField(Tag, related_name="jobs", blank=True)
 
     scan_mode = models.IntegerField(
@@ -433,9 +435,21 @@ class Job(MP_Node):
         null=True, blank=True, default=datetime.timedelta(hours=24)
     )
     sent_to_bi = models.BooleanField(editable=False, default=False)
+    data_model_content_type = models.ForeignKey(
+        ContentType,
+        on_delete=models.CASCADE,
+        limit_choices_to={
+            "app_label": "data_model_manager",
+        },
+        null=True,
+        editable=False,
+        blank=True,
+    )
+    data_model_object_id = models.IntegerField(null=True, editable=False, blank=True)
+    data_model = GenericForeignKey("data_model_content_type", "data_model_object_id")
 
     def __str__(self):
-        return f'{self.__class__.__name__}(#{self.pk}, "{self.analyzed_object_name}")'
+        return f'{self.__class__.__name__}(#{self.pk}, "{self.analyzable.name}")'
 
     def get_root(self):
         if self.is_root():
@@ -447,22 +461,9 @@ class Job(MP_Node):
             # this is not a really valid solution, but it will work for now
             return self.objects.filter(path=self.path[0 : self.steplen]).first()  # noqa
 
-    @property
-    def analyzed_object_name(self):
-        return self.file_name if self.is_sample else self.observable_name
-
-    @property
-    def analyzed_object(self):
-        return self.file if self.is_sample else self.observable_name
-
     @cached_property
-    def sha256(self) -> str:
-        """
-        Calculate and return the SHA-256 hash of the file or observable name.
-        """
-        return calculate_sha256(
-            self.file.read() if self.is_sample else self.observable_name.encode("utf-8")
-        )
+    def is_sample(self) -> bool:
+        return self.analyzable.is_sample
 
     @cached_property
     def parent_job(self) -> Optional["Job"]:
@@ -470,24 +471,6 @@ class Job(MP_Node):
         Return the parent job if it exists, otherwise return None.
         """
         return self.get_parent()
-
-    @cached_property
-    def sha1(self) -> str:
-        """
-        Calculate and return the SHA-1 hash of the file or observable name.
-        """
-        return calculate_sha1(
-            self.file.read() if self.is_sample else self.observable_name.encode("utf-8")
-        )
-
-    @cached_property
-    def b64(self) -> str:
-        """
-        Return the Base64 encoded string of the file or observable name.
-        """
-        return base64.b64encode(
-            self.file.read() if self.is_sample else self.observable_name.encode("utf-8")
-        ).decode("utf-8")
 
     def get_absolute_url(self):
         """
@@ -513,7 +496,7 @@ class Job(MP_Node):
         """
         Retry the job by setting its status to running and re-executing the pipeline.
         """
-        self.status = self.Status.RUNNING
+        self.status = self.STATUSES.RUNNING
         self.save(update_fields=["status"])
 
         runner = self._get_pipeline(
@@ -532,7 +515,7 @@ class Job(MP_Node):
     def set_final_status(self) -> None:
         logger.info(f"[STARTING] set_final_status for <-- {self}.")
 
-        if self.status == self.Status.FAILED:
+        if self.status == self.STATUSES.FAILED:
             logger.error(
                 f"[REPORT] {self}, status: failed. " "Do not process the report"
             )
@@ -541,13 +524,13 @@ class Job(MP_Node):
             logger.info(f"[REPORT] {self}, status:{self.status}, reports:{stats}")
 
             if stats["success"] == stats["all"]:
-                self.status = self.Status.REPORTED_WITHOUT_FAILS
+                self.status = self.STATUSES.REPORTED_WITHOUT_FAILS
             elif stats["failed"] == stats["all"]:
-                self.status = self.Status.FAILED
+                self.status = self.STATUSES.FAILED
             elif stats["killed"] == stats["all"]:
-                self.status = self.Status.KILLED
+                self.status = self.STATUSES.KILLED
             elif stats["failed"] >= 1 or stats["killed"] >= 1:
-                self.status = self.Status.REPORTED_WITH_FAILS
+                self.status = self.STATUSES.REPORTED_WITH_FAILS
 
         self.finished_analysis_time = get_now()
 
@@ -559,14 +542,13 @@ class Job(MP_Node):
                 "finished_analysis_time",
             ]
         )
-        try:
-            # we update the status of the analysis
-            if root_investigation := self.get_root().investigation:
-                root_investigation.set_correct_status(save=True)
-        except Exception as e:
-            logger.exception(
-                f"investigation status not updated. Job: {self.pk}. Error: {e}"
-            )
+        # we update the status of the analysis
+        if root_investigation := self.get_root().investigation:
+            from api_app.investigations_manager.models import Investigation
+
+            logger.info(f"Updating status of investigation {root_investigation.pk}")
+            root_investigation: Investigation
+            root_investigation.set_correct_status(save=True)
 
     def __get_config_reports(self, config: typing.Type["AbstractConfig"]) -> QuerySet:
         return getattr(self, f"{config.__name__.split('Config')[0].lower()}reports")
@@ -584,7 +566,7 @@ class Job(MP_Node):
         reports = self.__get_config_reports(config)
         aggregators = {
             s.lower(): models.Count("status", filter=models.Q(status=s))
-            for s in AbstractReport.Status.values
+            for s in AbstractReport.STATUSES.values
         }
         return reports.aggregate(
             all=models.Count("status"),
@@ -616,8 +598,8 @@ class Job(MP_Node):
         for config in [AnalyzerConfig, ConnectorConfig, VisualizerConfig]:
             reports = self.__get_config_reports(config).filter(
                 status__in=[
-                    AbstractReport.Status.PENDING,
-                    AbstractReport.Status.RUNNING,
+                    AbstractReport.STATUSES.PENDING,
+                    AbstractReport.STATUSES.RUNNING,
                 ]
             )
 
@@ -626,9 +608,9 @@ class Job(MP_Node):
             # kill celery tasks using task ids
             celery_app.control.revoke(ids, terminate=True)
 
-            reports.update(status=self.Status.KILLED)
+            reports.update(status=self.STATUSES.KILLED, end_time=now())
 
-        self.status = self.Status.KILLED
+        self.status = self.STATUSES.KILLED
         self.save(update_fields=["status"])
         JobConsumer.serialize_and_send_job(self)
 
@@ -674,6 +656,18 @@ class Job(MP_Node):
     def priority(self):
         return self.user.profile.task_priority
 
+    def _get_engine_signature(self) -> Signature:
+        from api_app.engines_manager.tasks import execute_engine
+
+        return execute_engine.signature(
+            args=[self.pk],
+            kwargs={},
+            queue=get_queue_name(settings.CONFIG_QUEUE),
+            immutable=True,
+            MessageGroupId=str(uuid.uuid4()),
+            priority=self.priority,
+        )
+
     def _get_pipeline(
         self,
         analyzers: PythonConfigQuerySet,
@@ -687,6 +681,7 @@ class Job(MP_Node):
         ).distinct()
         if pivots_analyzers.exists():
             runner |= self._get_signatures(pivots_analyzers)
+        runner |= self._get_engine_signature()
         if connectors.exists():
             runner |= self._get_signatures(connectors)
             pivots_connectors = pivots.filter(
@@ -700,7 +695,7 @@ class Job(MP_Node):
         return runner
 
     def execute(self):
-        self.status = self.Status.RUNNING
+        self.status = self.STATUSES.RUNNING
         self.save(update_fields=["status"])
         runner = self._get_pipeline(
             self.analyzers_to_execute.all(),
@@ -709,6 +704,15 @@ class Job(MP_Node):
             self.visualizers_to_execute.all(),
         )
         runner()
+
+    def get_user_events_data_model(self) -> BaseDataModelQuerySet:
+        return self.analyzable.get_all_user_events_data_model(self.user)
+
+    def get_analyzers_data_models(self) -> BaseDataModelQuerySet:
+        DataModel = self.analyzable.get_data_model_class()  # noqa
+        return DataModel.objects.filter(
+            pk__in=self.analyzerreports.values_list("data_model_object_id", flat=True)
+        )
 
     def get_config_runtime_configuration(self, config: "AbstractConfig") -> typing.Dict:
         try:
@@ -739,7 +743,7 @@ class Job(MP_Node):
                     day=1, hour=0, minute=0, second=0, microsecond=0
                 )
             )
-            .exclude(status=cls.Status.FAILED)
+            .exclude(status=cls.STATUSES.FAILED)
             .count()
         )
 
@@ -1024,18 +1028,6 @@ class PluginConfig(OwnershipAbstractModel):
     def plugin_name(self):
         """Returns the name of the plugin associated with this configuration."""
         return self.config.name
-
-    @property
-    def type(self):
-        """Returns the type of the plugin associated with this configuration."""
-        # TODO retrocompatibility
-        return self.config.plugin_type
-
-    @property
-    def config_type(self):
-        """Returns the type of the configuration (1 or 2)."""
-        # TODO retrocompatibility
-        return "2" if self.is_secret() else "1"
 
 
 class OrganizationPluginConfiguration(models.Model):
@@ -1346,10 +1338,10 @@ class AbstractReport(models.Model):
 
     objects = AbstractReportQuerySet.as_manager()
     # constants
-    Status = ReportStatus
+    STATUSES = ReportStatus
 
     # fields
-    status = models.CharField(max_length=50, choices=Status.choices)
+    status = models.CharField(max_length=50, choices=STATUSES.choices)
     report = models.JSONField(default=dict)
     errors = pg_fields.ArrayField(
         models.CharField(max_length=512), default=list, blank=True
@@ -1399,12 +1391,12 @@ class AbstractReport(models.Model):
 
     # properties
     @property
-    def user(self) -> models.Model:
+    def user(self) -> User:
         """
         Returns the user associated with the job that generated the report.
 
         Returns:
-            models.Model: The user associated with the job.
+            User: The user associated with the job.
         """
         return self.job.user
 
@@ -1418,6 +1410,41 @@ class AbstractReport(models.Model):
         """
         secs = (self.end_time - self.start_time).total_seconds()
         return round(secs, 2)
+
+    def get_value(
+        self, search_from: typing.Any, fields: typing.List[str]
+    ) -> typing.Any:
+        if not fields:
+            return search_from
+        search_keyword = fields.pop(0)
+        if isinstance(search_from, list):
+            try:
+                index = int(search_keyword)
+            except ValueError:
+                result = []
+                errors = []
+                for i, obj in enumerate(search_from):
+                    # if we are iterating a list, we get all the objects that matches
+                    try:
+                        res = self.get_value(obj, [search_keyword] + fields)
+                        if isinstance(res, list):
+                            result.extend(res)
+                        else:
+                            result.append(res)
+                    except KeyError:
+                        errors.append(
+                            f"Field {search_keyword} not available at position {i}"
+                        )
+                if result:
+                    self.errors.extend(errors)
+                else:
+                    raise Exception("No object matches")
+
+                return result
+            else:
+                # a.b.0
+                return self.get_value(search_from[index], fields)
+        return self.get_value(search_from[search_keyword], fields)
 
 
 class PythonConfig(AbstractConfig):
