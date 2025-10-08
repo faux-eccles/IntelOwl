@@ -7,6 +7,7 @@ from api_app.visualizers_manager.classes import VisualizableObject, Visualizer
 from api_app.visualizers_manager.decorators import (
     visualizable_error_handler_with_params,
 )
+from api_app.visualizers_manager.enums import VisualizableSize
 
 logger = getLogger(__name__)
 
@@ -20,23 +21,20 @@ class UrlScan(Visualizer):
         logger.debug(f"{printable_analyzer_name=}: {key}")
         disable_element = False
         task = analyzer_report.report["page"]
-        #        return self.VList(
-        #            name=self.Base(value=f"{key}", disable=disable_element),
-        #            value=[
-        #                self.Base(
-        #                    value=task[key],
-        #                    disable=False,
-        #                )
-        #            ],
-        #            size=self.Size.S_2,
-        #            disable=disable_element,
-        #            start_open=True,
-        #        )
+        # return self.VList(
+        #   name=self.Base(value=f"{key}", disable=True),
+        #   value=[
+        #       self.Base(
+        #           value=task[key],
+        #           disable=False,
+        #       )
+        #   ],
+        #   size=self.Size.S_ALL,
+        #   disable=disable_element,
+        #   start_open=True,
+        # )
 
-        return self.Base(
-            value=task[key],
-            disable=False,
-        )
+        return self.Base(value=task[key], disable=False, size=VisualizableSize.S_ALL)
 
     @visualizable_error_handler_with_params()
     def _scan_task_item(
@@ -59,17 +57,33 @@ class UrlScan(Visualizer):
             start_open=True,
         )
 
+    def find_domain_ips(self, domain: str, report: AnalyzerReport) -> list[str]:
+        "Retrieve a list of IPs observerd with a given IP based on the domain stats"
+
+        if "://" in domain:
+            domain = domain.split("://")[-1].split("/")[0]
+
+        stats: list = report.report["stats"]["domainStats"]
+        for stat in stats:
+            if stat["domain"] == domain:
+                return stat["ips"]
+        return ["No IP matched"]
+
     def run(self) -> List[Dict]:
         try:
-            url_scan_report = [
+            url_scan_report: list[AnalyzerReport] = [
                 self.get_analyzer_reports().get(config__name="UrlScan_Submit_Result")
             ]
         except AnalyzerReport.DoesNotExist:
             logger.warning("Couldn't access expecte URLScan report")
             return []
         # Tab
+        report = url_scan_report[0]
+
         page = self.Page(name="URL Scan")
+
         # Line 1
+        # Redirect chain
         page.add_level(
             self.Level(
                 position=1,
@@ -77,19 +91,61 @@ class UrlScan(Visualizer):
                 horizontal_list=self.HList(
                     value=[
                         self.Table(
-                            [self.TableColumn(a) for a in ["url", "ip"]],
+                            [
+                                self.TableColumn(a, disable_sort_by=True)
+                                for a in ["url", "ip", "response code"]
+                            ],
                             [
                                 {
-                                    "url": self._scan_page_item(
-                                        url_scan_report[0], "url"
+                                    "url": self.Base(
+                                        report.report["data"]["requests"][0]["request"][
+                                            "documentURL"
+                                        ]
                                     ),
-                                    "ip": self._scan_page_item(
-                                        url_scan_report[0], "ip"
+                                    "ip": self.HList(
+                                        [
+                                            self.Base(ip)
+                                            for ip in self.find_domain_ips(
+                                                report.report["data"]["requests"][0][
+                                                    "request"
+                                                ]["documentURL"],
+                                                report,
+                                            )
+                                        ]
+                                    ),
+                                    "response code": self.Base(
+                                        report.report["data"]["requests"][0][
+                                            "response"
+                                        ]["response"]["status"]
                                     ),
                                 }
+                            ]
+                            + [
+                                {
+                                    "url": self.Base(
+                                        redirect["redirectResponse"]["url"]
+                                    ),
+                                    "ip": self.HList(
+                                        [
+                                            self.Base(ip)
+                                            for ip in self.find_domain_ips(
+                                                redirect["redirectResponse"]["url"],
+                                                report,
+                                            )
+                                        ]
+                                    ),
+                                    "response code": self.Base(
+                                        redirect["redirectResponse"]["status"]
+                                    ),
+                                }
+                                for redirect in report.report["data"]["requests"][0][
+                                    "requests"
+                                ]
+                                if "redirectResponse" in redirect
                             ],
+                            size=VisualizableSize.S_ALL,
                         )
-                    ]
+                    ],
                 ),
             )
         )
@@ -123,6 +179,7 @@ class UrlScan(Visualizer):
                                     ),
                                 }
                             ],
+                            size=VisualizableSize.S_ALL,
                         )
                     ]
                 ),
